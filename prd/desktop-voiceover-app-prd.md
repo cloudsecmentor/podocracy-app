@@ -8,7 +8,9 @@ Podocracy is currently running `podocracy.win` with the frontend and API from `/
 
 This PRD evaluates a small desktop app for a handful of users on older macOS and Windows laptops. The app should collect the same per-file information as the current web upload flow, produce similar voiceover results, and help verify whether users can successfully work with OpenAI APIs or whether DeepSeek should be supported as a lower-cost or preferred model provider.
 
-The recommended MVP is not a fully offline native processing app. The lowest-risk first release is a thin desktop wrapper around the existing `/v1/me/*` API contract, plus a guided manual-recording/export path inspired by the BEMA workflow. Local worker execution and self-healing agent automation should be treated as later experiments because they add significant packaging, credentials, observability, and support risk.
+The lowest-risk first release is still a thin desktop wrapper around the existing `/v1/me/*` API contract, plus a guided manual-recording/export path inspired by the BEMA workflow. However, if the product decision is to stop hosting the API/workers in Azure and instead give users the worker to run locally with their own provider keys, the MVP changes substantially: the app becomes a local pipeline manager, not an upload client.
+
+Converting the current worker into an end-user app is medium-high difficulty for a Docker-based wrapper and high difficulty for a polished native app. The worker can run locally in principle, but today it is infrastructure code with Linux, Azure, subprocess, env-var, and API-callback assumptions.
 
 ## Codebase Findings
 
@@ -125,6 +127,29 @@ Important constraints:
 - The current orchestrator can continue after a failed stage and still mark work as completed. A desktop app should not hide stage errors.
 - Local native execution on old Windows/macOS machines is likely fragile. Docker is more realistic, but Docker may be too heavy for some old laptops.
 
+### Local Worker Conversion Assessment
+
+If users run the worker locally and provide their own API keys, the hosted Podocracy API stops being the center of the workflow. The app must replace several cloud responsibilities that are currently hidden from users.
+
+Required conversion work:
+
+- Define a first-class local project folder contract: source file, params JSON, optional subtitles, intermediate JSON, final audio/video, and logs.
+- Generate `params.json` locally from the same settings users provide in the web app.
+- Make Azure Blob Storage optional or remove it from the local path; local files should be the default source of truth.
+- Make API status callbacks optional; the app should read progress from stdout, a local status file, or a small local worker API.
+- Make stage subprocess failures fatal or mark the project `failed`/`completed_with_errors`; current behavior can hide broken stages.
+- Store user provider keys securely in the OS keychain or equivalent, not plain `.env` files.
+- Add onboarding checks for `OPENAI_API_KEY`, `DEEPL_AUTH_KEY`, optional `ELEVENLABS_API_KEY`, and optional DeepSeek configuration.
+- Package or detect `ffmpeg`, Python dependencies, and optionally `yt-dlp`.
+- Disable local Whisper by default on old laptops; keep `whisper_api=true` unless a user explicitly chooses local transcription.
+- Remove or guard Linux/cloud assumptions such as runtime `apt-get`, Azure CLI managed identity secret retrieval, and macOS-only helper calls.
+
+Difficulty estimate:
+
+- **Docker wrapper:** medium-high. Fastest path because the worker already has a Linux container shape, but users must be able to install/run Docker and the app must manage volumes, env vars, logs, and updates.
+- **Native bundled app:** high. Better user experience if done well, but requires refactoring scripts into a portable runtime and bundling Python, `ffmpeg`, audio libraries, and model/provider configuration across macOS and Windows.
+- **Agent/skills wrapper only:** high support risk for normal users. Useful as maintainer tooling, but not a replacement for deterministic packaging and progress/error handling.
+
 ### Model Provider Findings
 
 Current model/provider usage is not abstracted.
@@ -240,36 +265,39 @@ Best use:
 
 ### Scenario B: Desktop App Plus Local Docker Worker
 
-The app still uses Podocracy API for identity, project records, and artifact sync, but can run the legacy worker locally in Docker.
+The app gives users the worker as a local Docker runtime. Files, params, logs, and outputs live in a local project folder. Users provide provider API keys.
 
 Flow:
 
-1. App authenticates user.
-2. App prepares or downloads source and params.
+1. App creates a local project folder.
+2. User selects source file, language, stages, voice, subtitles, and custom instructions.
 3. App runs worker container locally.
-4. Worker reads local files or Azure blob paths.
-5. App uploads generated artifacts back to Podocracy or a configured destination.
+4. Worker reads local files and local params.
+5. Worker calls OpenAI, DeepL, optional DeepSeek, and optional ElevenLabs directly using user-provided keys.
 6. App surfaces logs and stage failures.
+7. App exports final artifacts from the local project folder.
 
 Pros:
 
-- Gives users more control and may reduce cloud VM cost.
+- Removes hosted worker/API cost and Azure worker operations.
 - Enables experimentation with user-owned API keys.
 - Can run long jobs without provisioning an Azure VM.
 - Closer to a "local app" mental model.
+- Keeps the existing Linux worker environment mostly intact.
 
 Cons:
 
 - Docker may not run well on old laptops.
 - Windows/macOS packaging and ffmpeg/audio dependencies become support burdens.
-- Worker currently assumes Linux, Azure Blob, API callbacks, and cloud credentials.
-- Internal API keys and storage credentials must not be shipped casually.
+- Worker currently assumes Azure Blob, API callbacks, cloud credentials, and cloud-style status.
+- Users now need to manage paid provider keys and provider billing.
 - Existing worker failure reporting is not robust enough for nontechnical users.
 - Local CPU/RAM may be weak, especially if local Whisper is enabled.
+- Larger app support surface: Docker install, image updates, volume mounts, env vars, logs, and provider account setup.
 
 Best use:
 
-- Private alpha for one or two technically tolerant users after the thin wrapper works.
+- Best first path if the strategic goal is to stop hosting Azure processing while avoiding a full native rewrite.
 
 ### Scenario C: Native Local Pipeline Without Docker
 
@@ -353,11 +381,15 @@ Best use:
 
 ## Recommended MVP
 
-Ship a thin desktop wrapper plus an optional manual-recording assistant.
+There are two different MVPs depending on the hosting decision. They should not be mixed casually.
 
-### MVP Scope
+If Podocracy continues hosting API and workers, ship the thin desktop wrapper plus an optional manual-recording assistant. This remains the lowest-risk MVP for older laptops.
 
-The first MVP should include:
+If Podocracy stops hosting API/workers and gives users the worker, ship a local-worker MVP instead. In that case, the MVP is no longer about upload, queue, and download; it is about local project management, provider-key setup, local runtime packaging, progress/error handling, and local artifact export.
+
+### Cloud Wrapper MVP Scope
+
+The cloud-wrapper MVP should include:
 
 - Sign in with Podocracy account through browser/device-code OAuth.
 - Upload local media file or submit URL.
@@ -392,9 +424,47 @@ The first MVP should include:
   - optionally run silence cleanup if ffmpeg is available
   - export/upload final voiceover asset when ready
 
-### MVP Exclusions
+### Local Worker MVP Scope
 
-Do not include these in the first release:
+The local-worker MVP should include:
+
+- Create a local project folder per source file.
+- Copy or reference the source media file locally.
+- Show the same basic settings as the web app:
+  - project name
+  - target language
+  - preset stages
+  - voice
+  - custom instructions
+  - subtitle file
+- Generate a local params JSON file from those settings.
+- Store provider keys securely:
+  - OpenAI for Whisper/TTS and current text stages
+  - DeepL for translation
+  - optional ElevenLabs for TTS
+  - optional DeepSeek for text stages after provider abstraction exists
+- Run provider validation before the first paid job:
+  - key present
+  - small test request succeeds
+  - selected model/provider is supported for the selected stage
+- Launch the worker locally, preferably through Docker for the first technical alpha.
+- Stream or poll local progress.
+- Stop on stage failure and show the failing stage/log tail.
+- Export local artifacts:
+  - `voiceover.mp3`
+  - `voiceover.mp4` when video postprocess is applicable
+  - `raw.json`, `combined.json`, `translated.json`, `improved.json` when produced
+  - logs and support bundle
+- Include a manual recording fallback:
+  - import/display chunks from `improved.json` or text
+  - guide Audacity export naming
+  - validate segment files
+  - optionally run silence cleanup if `ffmpeg` is available
+  - export a final local MP3
+
+### Cloud Wrapper MVP Exclusions
+
+Do not include these in the cloud-wrapper first release:
 
 - Local Docker worker execution.
 - Native Python worker packaging.
@@ -403,7 +473,21 @@ Do not include these in the first release:
 - Full DeepSeek replacement of all AI stages.
 - Complex chapter artwork and publishing sidecars.
 
-### MVP Success Criteria
+### Local Worker MVP Exclusions
+
+Do not include these in the local-worker first release:
+
+- Azure B2C login.
+- `/v1/me/uploads/*` upload flow.
+- Azure queue dispatch.
+- Azure Blob Storage as the required project store.
+- User-managed Azure storage credentials.
+- Local Whisper by default on old laptops.
+- Native packaging before Docker-wrapper validation, unless Docker is impossible for the target machines.
+- Full DeepSeek replacement of transcription, translation, and TTS.
+- Autonomous agent repair without explicit user approval.
+
+### Cloud Wrapper MVP Success Criteria
 
 For the first 3 to 5 users:
 
@@ -414,11 +498,23 @@ For the first 3 to 5 users:
 - Users can complete one short test project using the default OpenAI-backed server pipeline.
 - At least one user can complete the manual recording path with Audacity-exported files.
 
+### Local Worker MVP Success Criteria
+
+For the first 3 to 5 users:
+
+- At least 80 percent can install and launch the app.
+- At least 80 percent can configure required provider keys with guided checks.
+- At least 80 percent can create a local project and run one short file end to end.
+- The app produces a final local `voiceover.mp3` for a short file.
+- The app clearly reports provider-key failures, missing `ffmpeg`, Docker/runtime failures, and stage failures.
+- Failures produce a local support bundle with params, app logs, worker logs, stage logs, and environment checks.
+- Users can understand provider cost exposure before starting a paid run.
+
 ## OpenAI vs DeepSeek Validation Plan
 
 The first MVP should answer a practical question: are user problems caused by provider cost/access, output quality, app UX, or local machine constraints?
 
-### Phase 1: Server-Side OpenAI Baseline
+### Phase 1A: Server-Side OpenAI Baseline
 
 Use the existing server-side OpenAI/DeepL/TTS pipeline. Users do not supply model API keys.
 
@@ -437,6 +533,33 @@ Decision:
 - If cost is the main issue, add provider comparison server-side before asking users to manage keys.
 - If quality is the issue, compare DeepSeek only on text stages first.
 - If upload/auth/progress is the issue, changing models will not help.
+
+### Phase 1B: Local User-Key Baseline
+
+If the MVP moves to local worker distribution, replace the server-side baseline with a local user-key baseline.
+
+Use the current provider mix first:
+
+- OpenAI Whisper API for transcription.
+- DeepL for translation.
+- OpenAI text models for `customize`, `timesync`, and `improve`.
+- OpenAI TTS or ElevenLabs for voiceover.
+
+Measure:
+
+- Key setup success.
+- Provider test-call success.
+- Local runtime startup success.
+- End-to-end completion time.
+- Provider errors and rate limits.
+- Estimated and actual provider cost per project.
+- Quality feedback on translation, improvement, and voiceover.
+
+Decision:
+
+- If users cannot configure keys reliably, local-worker distribution is not ready for nontechnical users.
+- If provider cost is the issue, compare DeepSeek for text stages before changing transcription or TTS.
+- If runtime startup is the issue, prioritize packaging and diagnostics over model changes.
 
 ### Phase 2: Text-Stage Provider Experiment
 
@@ -477,7 +600,7 @@ Decision:
 
 ### Phase 3: User-Owned API Keys
 
-Only test user-owned keys after the app has proven the basic cloud flow.
+Only test user-owned keys after the app has proven the basic cloud flow, unless the product decision is explicitly local-worker-first.
 
 Options:
 
@@ -486,7 +609,8 @@ Options:
 
 Recommendation:
 
-- Prefer server-side encrypted keys if this becomes necessary. Local keys plus local processing adds more variables and will be harder to support for nontechnical users.
+- For the cloud-wrapper MVP, prefer server-side encrypted keys if user-owned keys become necessary.
+- For the local-worker MVP, store keys locally in the OS keychain and never write them into project folders, support bundles, logs, or params JSON.
 
 ## Self-Healing and Agent-Assisted Support
 
@@ -505,6 +629,17 @@ Add deterministic checks:
 - Are expected artifacts present.
 - Did worker logs contain known failure strings.
 
+For the local-worker MVP, replace API checks with local runtime checks:
+
+- Can create a project folder.
+- Can read/write params and output files.
+- Can locate Docker or the bundled runtime.
+- Can locate `ffmpeg`.
+- Can run a worker smoke test.
+- Can validate provider keys.
+- Can detect missing or empty output artifacts.
+- Can collect local app and worker logs.
+
 For known failures, show a specific recovery action:
 
 - Re-authenticate.
@@ -514,6 +649,8 @@ For known failures, show a specific recovery action:
 - Disable timesync if proofread file is missing.
 - Use cloud processing instead of local worker.
 - Install or select ffmpeg.
+- Re-enter or replace provider key.
+- Switch from local runtime to Docker runtime, or from Docker runtime to manual recording, when available.
 
 ### Later Agent Mode
 
@@ -557,6 +694,8 @@ For this user base, Tauri or Electron are more attractive than native Python bec
 - Packaging can include a small local service later if needed.
 - The desktop app can stay mostly API-driven.
 
+For a local-worker MVP, Tauri or Electron can still be the shell, but the core product is the runtime manager. The app needs a local worker adapter that can create params, launch the worker, stream progress, collect logs, and manage provider keys.
+
 Suggested modules:
 
 - `auth`: browser/device-code sign-in and token refresh.
@@ -568,6 +707,15 @@ Suggested modules:
 - `manualRecording`: chunk display, segment validation, optional ffmpeg cleanup.
 - `supportBundle`: logs, settings, status history, known failure checks.
 - `providerExperiment`: hidden/internal model-provider fields for controlled testing.
+
+Additional modules for local-worker MVP:
+
+- `localProject`: project folder creation, file layout, artifact discovery.
+- `keyManager`: OS keychain storage and provider validation.
+- `runtimeManager`: Docker/native runtime detection, launch, update, and diagnostics.
+- `workerProgress`: parse stdout/status files and expose stage progress.
+- `stageLogs`: collect per-stage logs and failure tails.
+- `costPreview`: explain provider usage before starting paid work.
 
 ### API Contract Work Before App Build
 
@@ -592,13 +740,25 @@ These are useful regardless of desktop design:
 - Document exact params contract consumed by the worker.
 - Keep default path cloud-first and avoid local machine dependency in user MVP.
 
+For the local-worker MVP, add:
+
+- A `--local-mode` or equivalent runtime mode that disables Azure/API assumptions.
+- A local params schema that can be generated by the app without the hosted API.
+- A local progress/status file or structured stdout events.
+- A local artifact manifest written at the end of each stage.
+- A safe secret-loading path that never persists API keys into artifacts.
+- A Docker image update/version check visible to the app.
+
 ## Risks
 
-- Users may expect the desktop app to work offline. The MVP should clearly state that processing is cloud-backed.
+- Users may expect the desktop app to work fully offline. The cloud-wrapper MVP should clearly state that processing is cloud-backed; the local-worker MVP should clearly state that model providers still require internet access and paid API keys.
 - Old laptops may struggle with large file upload, local audio preview, and any bundled processing.
 - DeepSeek may reduce cost for text stages but cannot replace Whisper/TTS/DeepL without more provider work.
 - Local worker support can quickly become a second product.
 - Agent-based self-healing can create trust and safety problems if it starts paid jobs or edits files without clear approval.
+- In the local-worker MVP, users are directly exposed to provider billing, rate limits, account setup, and key security.
+- Docker-based local processing may be impossible on some old machines; native packaging may be expensive to support.
+- Local support bundles must be scrubbed to avoid leaking API keys or source content the user does not want to share.
 
 ## Open Questions
 
@@ -608,14 +768,17 @@ These are useful regardless of desktop design:
 - Is BEMA-style chapter/tag export needed for Podocracy users in the first release?
 - Which old macOS versions and Windows versions must be supported?
 - Should the MVP be installed app only, or can it start as a packaged local web app/PWA plus helper scripts?
+- Can the target users install and run Docker, or must the worker be bundled natively?
+- If users provide their own keys, who supports provider account creation, billing surprises, rate limits, and quota errors?
 
 ## Recommended Next Steps
 
-1. Build a clickable desktop-app prototype that mirrors the web upload wizard and downloads existing project results.
-2. Add the real API client and OAuth flow.
-3. Run a 3-user test with one short file each using the current OpenAI-backed cloud worker.
-4. Add support bundle export and known failure checks.
-5. Add manual recording import/validation using BEMA naming concepts.
-6. Only after the above, prototype DeepSeek for `improve` and `customize` stages behind a server-side feature flag.
-7. Treat local Docker worker and agent-assisted repair as separate alpha tracks.
+1. Decide between cloud-wrapper MVP and local-worker MVP before building the app shell.
+2. If cloud-wrapper MVP: build a clickable prototype that mirrors the web upload wizard and downloads existing project results.
+3. If local-worker MVP: define the local project folder contract and params schema first.
+4. If local-worker MVP: create a Docker-wrapper proof of concept that runs one short local file with user-provided OpenAI and DeepL keys.
+5. Add support bundle export and known failure checks for the chosen MVP path.
+6. Add manual recording import/validation using BEMA naming concepts.
+7. Prototype DeepSeek only for `improve` and `customize` after a provider adapter exists.
+8. Treat agent-assisted repair as a separate maintainer/admin track.
 
