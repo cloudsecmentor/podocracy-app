@@ -13,3 +13,4 @@ opencensus-ext-azure==1.1.13
 pydantic==2.10.3
 mutagen==1.47.0
 pysubs2==1.8.0
+yt-dlp

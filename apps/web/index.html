@@ -20,8 +20,13 @@
         <h2>New Project</h2>
         <form id="project-form">
           <label>
-            Source MP3 or MP4
-            <input type="file" name="source" accept=".mp3,.mp4,.m4a,.wav,.url,audio/*,video/*" required>
+            Source media
+            <input type="file" name="source" accept=".mp3,.mp4,.m4a,.wav,.url,audio/*,video/*">
+          </label>
+
+          <label>
+            Source URL
+            <input type="url" name="source_url" placeholder="https://...">
           </label>
 
           <div class="grid">
@@ -47,12 +52,110 @@
             </label>
 
             <label>
+              TTS provider
+              <select name="tts_api">
+                <option value="openai" selected>OpenAI</option>
+                <option value="elevenlabs">ElevenLabs</option>
+              </select>
+            </label>
+
+            <label>
+              ElevenLabs voice ID
+              <input type="text" name="elevenlabs_voice_id" placeholder="Optional">
+            </label>
+
+            <label>
               Stage preset
               <select name="stage_preset">
                 <option value="voiceover" selected>Voiceover</option>
                 <option value="full">Full with improve</option>
                 <option value="translate-only">Translate only</option>
               </select>
+            </label>
+
+            <label>
+              Voiceover tempo
+              <input type="number" name="voiceover_tempo" min="0.5" max="2" step="0.05" value="1.2">
+              <span class="muted">1.0 = normal; legacy default is 1.2</span>
+            </label>
+
+            <label>
+              Voiceover shift
+              <input type="number" name="voiceover_shift" min="-300" max="300" step="0.1" placeholder="0">
+              <span class="muted">Seconds; positive moves narration later</span>
+            </label>
+
+            <label>
+              Preview size
+              <input type="number" name="max_preview_size_mb" min="0.1" max="500" step="0.1" value="2">
+              <span class="muted">MP4 preview limit in MB</span>
+            </label>
+
+            <label>
+              Whisper chunk
+              <input type="number" name="whisper_chunk_length_sec" min="10" max="3600" step="10" value="300">
+              <span class="muted">Seconds per transcription chunk</span>
+            </label>
+
+            <label>
+              Silence split
+              <input type="number" name="whisper_silence_sec" min="0.1" max="30" step="0.1" value="2">
+              <span class="muted">Pause length in seconds</span>
+            </label>
+
+            <label>
+              Sentence size
+              <input type="number" name="max_char_chunk_per_sentence" min="20" max="5000" step="10" value="200">
+              <span class="muted">Max chars before sentence break</span>
+            </label>
+
+            <label>
+              Transcript chunk
+              <input type="number" name="max_char_chunk" min="50" max="20000" step="50" value="700">
+              <span class="muted">Max chars per translated chunk</span>
+            </label>
+
+            <label>
+              Improve context
+              <input type="number" name="improve_max_chunk_chars" min="500" max="200000" step="500" value="12000">
+              <span class="muted">Max chars per improve request</span>
+            </label>
+          </div>
+
+          <div class="grid">
+            <label>
+              Subtitles
+              <input type="file" name="subtitle_file" accept=".srt,.vtt,.sbv,.txt">
+            </label>
+
+            <label>
+              Custom recordings ZIP
+              <input type="file" name="custom_recordings" accept=".zip">
+            </label>
+
+            <label class="check">
+              <input type="checkbox" name="use_subtitles_as_is" value="true">
+              Use subtitles as voiceover text
+            </label>
+
+            <label class="check">
+              <input type="checkbox" name="normalize_final_audio" value="true">
+              Normalize final audio
+            </label>
+
+            <label class="check">
+              <input type="checkbox" name="autogenerate_custom_instructions" value="true">
+              Autogenerate improve notes
+            </label>
+
+            <label class="check">
+              <input type="checkbox" name="detailed_transcription" value="true" checked>
+              Detailed word timing
+            </label>
+
+            <label class="check">
+              <input type="checkbox" name="whisper_silence_split" value="true">
+              Split Whisper chunks on silence
             </label>
           </div>
 

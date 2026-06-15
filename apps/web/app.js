@@ -90,7 +90,16 @@ async function loadProjects() {
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
+  const sourceFile = form.querySelector("input[name=source]").files[0];
+  const sourceUrl = form.querySelector("input[name=source_url]").value.trim();
+  if (!sourceFile && !sourceUrl) {
+    alert("Upload a source file or provide a source URL.");
+    return;
+  }
   const formData = new FormData(form);
+  if (!form.querySelector("input[name=detailed_transcription]").checked) {
+    formData.set("detailed_transcription", "false");
+  }
   const submit = form.querySelector("button[type=submit]");
   submit.disabled = true;
   submit.textContent = "Creating...";
