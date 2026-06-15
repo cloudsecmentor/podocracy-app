@@ -1,0 +1,7 @@
+interface:
+  display_name: "Podocracy Worker Portal"
+  short_description: "Deploy and test the worker portal"
+  default_prompt: "Use $podocracy-worker-portal to deploy the Docker Compose portal and run an end-to-end MP3 voiceover test."
+
+policy:
+  allow_implicit_invocation: true

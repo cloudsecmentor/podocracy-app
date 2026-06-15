@@ -1,0 +1,98 @@
+{
+    "__init__": {
+        "Reader": "not used level - only for testing purposes",
+        "Free": "basic level assigned to new users - it should always be the second in this list - used in get_initial_level",
+        "Standard": "next level, the only one currently available for purchase - used in set_user_level_after_purchase",
+        "Professional": "work in progress"
+    },
+    "project_name_editable": {
+        "Reader": false,
+        "Free": true,
+        "Standard": true,
+        "Professional": true
+    },
+    "pro_contorls_allowed": {
+        "Reader": false,
+        "Free": false,
+        "Standard": false,
+        "Professional": true
+    },
+    "project_save_allowed": {
+        "Reader": false,
+        "Free": true,
+        "Standard": true,
+        "Professional": true
+    },
+    "project_start_allowed": {
+        "Reader": false,
+        "Free": true,
+        "Standard": true,
+        "Professional": true
+    },
+    "language_editable": {
+        "Reader": false,
+        "Free": true,
+        "Standard": true,
+        "Professional": true
+    },
+    "stages_editable": {
+        "Reader": false,
+        "Free": true,
+        "Standard": true,
+        "Professional": true
+    },
+    "all_stages_editable": {
+        "Reader": false,
+        "Free": true,
+        "Standard": true,
+        "Professional": true
+    },
+    "custom_instructions_editable": {
+        "Reader": false,
+        "Free": true,
+        "Standard": true,
+        "Professional": true
+    },
+    "whisper_model_editable": {
+        "Reader": false,
+        "Free": false,
+        "Standard": false,
+        "Professional": true
+    },
+    "max_char_chunk_visible": {
+        "Reader": false,
+        "Free": false,
+        "Standard": false,
+        "Professional": true
+    },
+    "voices_choice_editable": {
+        "Reader": false,
+        "Free": false,
+        "Standard": true,
+        "Professional": true
+    },
+    "imp_editable": {
+        "Reader": false,
+        "Free": true,
+        "Standard": true,
+        "Professional": true
+    },
+    "adding_sections_imp_allowed": {
+        "Reader": false,
+        "Free": true,
+        "Standard": false,
+        "Professional": true
+    },
+    "recording_allowed": {
+        "Reader": false,
+        "Free": true,
+        "Standard": false,
+        "Professional": true
+    },
+    "processing_stages_advanced_allowed": {
+        "Reader": false,
+        "Free": false,
+        "Standard": false,
+        "Professional": true
+    }
+}

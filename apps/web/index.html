@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Podocracy Worker Portal</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>Podocracy Worker Portal</h1>
+          <p id="provider-status">Checking providers...</p>
+        </div>
+        <button id="refresh">Refresh</button>
+      </header>
+
+      <section class="panel">
+        <h2>New Project</h2>
+        <form id="project-form">
+          <label>
+            Source MP3 or MP4
+            <input type="file" name="source" accept=".mp3,.mp4,.m4a,.wav,.url,audio/*,video/*" required>
+          </label>
+
+          <div class="grid">
+            <label>
+              Target language
+              <select name="language">
+                <option value="RU" selected>Russian (RU)</option>
+                <option value="ES">Spanish (ES)</option>
+                <option value="FR">French (FR)</option>
+                <option value="DE">German (DE)</option>
+                <option value="IT">Italian (IT)</option>
+              </select>
+            </label>
+
+            <label>
+              Voice
+              <select name="voice">
+                <option value="alloy" selected>alloy</option>
+                <option value="verse">verse</option>
+                <option value="coral">coral</option>
+                <option value="sage">sage</option>
+              </select>
+            </label>
+
+            <label>
+              Stage preset
+              <select name="stage_preset">
+                <option value="voiceover" selected>Voiceover</option>
+                <option value="full">Full with improve</option>
+                <option value="translate-only">Translate only</option>
+              </select>
+            </label>
+          </div>
+
+          <label>
+            Custom instructions
+            <textarea name="custom_instructions" rows="3" placeholder="Optional style, terminology, or pronunciation notes"></textarea>
+          </label>
+
+          <button type="submit">Create Project</button>
+        </form>
+      </section>
+
+      <section class="split">
+        <div class="panel">
+          <h2>Projects</h2>
+          <div id="projects" class="projects"></div>
+        </div>
+
+        <div class="panel">
+          <h2>Project Detail</h2>
+          <div id="detail" class="detail empty">Select a project.</div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

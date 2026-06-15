@@ -1,0 +1,172 @@
+{
+    "supported_file_types": {
+        "description": "Supported file types.",
+        "value": [
+            "mp3",
+            "m4a",
+            "wav",
+            "ogg",
+            "flac",
+            "mkv",
+            "flv",
+            "avi",
+            "mov",
+            "mp4"
+        ]
+    },
+    "supported_video_file_types": {
+        "description": "Supported video file types.",
+        "value": [
+            "mkv",
+            "flv",
+            "avi",
+            "mov",
+            "mp4"
+        ]
+    },
+    "supported_subtitles_file_types": {
+        "description": "Supported subtitle file types.",
+        "value": [
+            "srt",
+            "vtt",
+            "sbv",
+            "txt"
+        ]
+    },
+    "text_key_for_improved_json_from_subtitles": {
+        "description": "Text to be used for original text when subtitles are provided.",
+        "value": "No original text, the translation is based on the uploaded subtitles."
+    },
+    "supported_url_services": {
+        "description": "Supported URL services.",
+        "value": [
+            "Apple Podcasts"
+        ]
+    },
+    "supported_processing_stages_basic": {
+        "description": "List of Supported supported_processing_stages.",
+        "value": [
+            {
+                "name": "basic_trn",
+                "display_name": "Transcribe and translate",
+                "comment": "Transcription and translation of the audio.",
+                "backend_mapping": "transcribe+combine+timesync+translate+customize"
+            },
+            {
+                "name": "basic_imp",
+                "display_name": "Improve",
+                "comment": "Improve translated text with custom instructions.",
+                "backend_mapping": "improve"
+            },
+            {
+                "name": "basic_voi",
+                "display_name": "Voiceover",
+                "comment": "Voiceover of the improved text.",
+                "backend_mapping": "voiceover"
+            }
+        ]
+    },
+    "supported_processing_stages_advanced": {
+        "description": "List of Supported supported_processing_stages.",
+        "value": [
+            {
+                "name": "advanced_tsc",
+                "display_name": "Transcribe",
+                "comment": "Transcription of the audio.",
+                "backend_mapping": "transcribe"
+            },
+            {
+                "name": "advanced_cmb",
+                "display_name": "Combine",
+                "comment": "Combine raw transcirption to chunks.",
+                "backend_mapping": "combine"
+            },
+            {
+                "name": "advanced_syn",
+                "display_name": "Time sync",
+                "comment": "Sync time with profread text if provided.",
+                "backend_mapping": "timesync"
+            },
+            {
+                "name": "advanced_trl",
+                "display_name": "Translate",
+                "comment": "Translation of the audio.",
+                "backend_mapping": "translate"
+            },
+            {
+                "name": "advanced_cus",
+                "display_name": "Customize",
+                "comment": "Auto genrate custom instructions.",
+                "backend_mapping": "customize"
+            },
+            {
+                "name": "advanced_imp",
+                "display_name": "Improve",
+                "comment": "Improve translated text with custom instructions.",
+                "backend_mapping": "improve"
+            },
+            {
+                "name": "advanced_voi",
+                "display_name": "Voiceover",
+                "comment": "Voiceover of the improved text.",
+                "backend_mapping": "voiceover"
+            }
+        ]
+    },
+    "stages_waits": {
+        "description": "Stages waits in percent. Make sure to add up to 100%.",
+        "value": {
+            "transcribe": 10,
+            "combine": 0,
+            "timesync": 0,
+            "translate": 20,
+            "customize": 10,
+            "improve": 20,
+            "voiceover": 40
+        }
+    },
+    "aci_slots_max_npr": {
+        "description": "Maximum number of ACI slots for NPR.",
+        "value": 2
+    },
+    "aci_slots_max_prd": {
+        "description": "Maximum number of ACI slots for PRD.",
+        "value": 8
+    },
+    "vm_slots_max_npr": {
+        "description": "Maximum number of VM slots for NPR.",
+        "value": 2
+    },
+    "vm_slots_max_prd": {
+        "description": "Maximum number of VM slots for PRD.",
+        "value": 8
+    },
+    "max_free_length": {
+        "description": "Maximum length of audio for free users in minutes.",
+        "value": 5
+    },
+    "limit_preview_length_minutes": {
+        "description": "Maximum length of preview version in minutes.",
+        "value": 3
+    },
+    "demo_user_id": {
+        "description": "Demo user id.",
+        "value": "000demo"
+    },
+    "convert_minutes_from_one_level_to_another": {
+        "description": "Convert minutes from one level to another. new_level_minutes = current_level_minutes * current_level_value / new_level_value",
+        "value": {
+            "Free": 0.5,
+            "Standard": 1,
+            "Professional": 2
+        }
+    },
+    "apple_podcasts_fields": {
+        "description": "JSON paths for extracting fields from Apple Podcasts episode data.",
+        "value": {
+            "name": [0, "data", "shelves", 0, "items", 0, "contextAction", "episodeOffer", "title"],
+            "length": [0, "data", "shelves", 0, "items", 0, "contextAction", "episodeOffer", "duration"],
+            "streamUrl": [0, "data", "shelves", 0, "items", 0, "contextAction", "episodeOffer", "streamUrl"]
+        }
+    }
+}

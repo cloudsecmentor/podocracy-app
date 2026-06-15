@@ -1,0 +1,40 @@
+services:
+  web:
+    build:
+      context: ./apps/web
+    environment:
+      PORTAL_ADMIN_PASSWORD: ${PORTAL_ADMIN_PASSWORD:-}
+    ports:
+      - "${PORTAL_HTTP_PORT:-8080}:80"
+    depends_on:
+      - app-api
+    restart: unless-stopped
+
+  app-api:
+    build:
+      context: ./apps/app-api
+    env_file:
+      - path: ${PODOCRACY_ENV_FILE:-.env}
+        required: false
+    environment:
+      PROJECTS_DIR: /data/projects
+    volumes:
+      - ./data/projects:/data/projects
+    expose:
+      - "8000"
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./worker
+    env_file:
+      - path: ${PODOCRACY_ENV_FILE:-.env}
+        required: false
+    environment:
+      PROJECTS_DIR: /data/projects
+      WORKER_POLL_SECONDS: ${WORKER_POLL_SECONDS:-3}
+    volumes:
+      - ./data/projects:/data/projects
+    depends_on:
+      - app-api
+    restart: unless-stopped
