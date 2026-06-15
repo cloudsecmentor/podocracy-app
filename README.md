@@ -6,7 +6,7 @@ Self-hosted Docker Compose portal for creating local voiceover translation proje
 
 ```bash
 export PODOCRACY_ENV_FILE=/absolute/path/to/provider.env
-docker compose up --build
+./scripts/start-local.sh
 ```
 
 Open `http://localhost:8080`.

@@ -16,6 +16,12 @@ from fastapi.responses import FileResponse, PlainTextResponse
 
 PROJECTS_DIR = Path(os.getenv("PROJECTS_DIR", "/data/projects"))
 PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+DOWNLOADABLE_WORK_FILES = {
+    "source.raw.json",
+    "source.combined.json",
+    "source.translated.json",
+    "source.improved.json",
+}
 
 app = FastAPI(title="Podocracy Worker Portal API")
 app.add_middleware(
@@ -212,13 +218,26 @@ def get_artifacts(project_id: str) -> list[dict[str, Any]]:
                     "download_url": f"/api/projects/{project_id}/download/{path.name}",
                 }
             )
+    for path in sorted((root / "work").glob("source.*.json")):
+        if path.is_file() and path.name in DOWNLOADABLE_WORK_FILES:
+            artifacts.append(
+                {
+                    "name": path.name,
+                    "path": f"work/{path.name}",
+                    "bytes": path.stat().st_size,
+                    "download_url": f"/api/projects/{project_id}/download/{path.name}",
+                }
+            )
     return artifacts
 
 
 @app.get("/api/projects/{project_id}/download/{filename}")
 def download_artifact(project_id: str, filename: str) -> FileResponse:
     root = project_path(project_id)
-    artifact = root / "output" / safe_name(filename)
+    safe_filename = safe_name(filename)
+    artifact = root / "output" / safe_filename
+    if not artifact.exists() and safe_filename in DOWNLOADABLE_WORK_FILES:
+        artifact = root / "work" / safe_filename
     if not artifact.exists() or not artifact.is_file():
         raise HTTPException(status_code=404, detail="Artifact not found")
     return FileResponse(path=artifact, filename=artifact.name)
@@ -229,7 +248,13 @@ def support_bundle(project_id: str) -> FileResponse:
     root = project_path(project_id)
     bundle_path = root / "output" / f"{project_id}.support.zip"
     with zipfile.ZipFile(bundle_path, "w", zipfile.ZIP_DEFLATED) as bundle:
-        for relative in ["metadata.json", "status.json", "manifest.json", "config/params.json"]:
+        for relative in [
+            "metadata.json",
+            "status.json",
+            "manifest.json",
+            "config/params.json",
+            "work/source.improved.json",
+        ]:
             path = root / relative
             if path.exists():
                 bundle.write(path, relative)

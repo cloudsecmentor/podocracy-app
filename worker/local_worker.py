@@ -12,7 +12,7 @@ from typing import Any
 from pydub import AudioSegment
 
 
-WORKER_VERSION = "local-worker-0.1.0"
+WORKER_VERSION = "local-worker-0.1.1"
 
 
 def now_iso() -> str:
@@ -111,6 +111,39 @@ def model_dump(value: Any) -> dict[str, Any]:
     return json.loads(value.model_dump_json())
 
 
+def get_timing_format(max_end_seconds: float) -> str:
+    return "hhmmss" if max_end_seconds > 6000 else "mmss"
+
+
+def seconds_to_timecode(seconds: float, timing_format: str = "mmss") -> str:
+    total_seconds = max(0, round(float(seconds)))
+    if timing_format == "hhmmss":
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds_remainder = divmod(remainder, 60)
+        return f"{hours:02d}{minutes:02d}{seconds_remainder:02d}"
+    minutes, seconds_remainder = divmod(total_seconds, 60)
+    return f"{minutes:02d}{seconds_remainder:02d}"
+
+
+def mmss_to_seconds(value: Any) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if len(text) == 4 and text.isdigit():
+        return int(text[:2]) * 60 + int(text[2:])
+    if len(text) == 6 and text.isdigit():
+        return int(text[:2]) * 3600 + int(text[2:4]) * 60 + int(text[4:])
+    return float(text)
+
+
+def segment_start_seconds(segment: dict[str, Any]) -> float:
+    return float(segment.get("start_seconds", mmss_to_seconds(segment.get("start", 0))))
+
+
+def segment_end_seconds(segment: dict[str, Any]) -> float:
+    return float(segment.get("end_seconds", mmss_to_seconds(segment.get("end", segment_start_seconds(segment)))))
+
+
 def transcribe(source_mp3: Path, project: Path, logger: logging.Logger) -> list[dict[str, Any]]:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
@@ -145,16 +178,22 @@ def transcribe(source_mp3: Path, project: Path, logger: logging.Logger) -> list[
         duration = AudioSegment.from_file(source_mp3).duration_seconds
         segments = [{"id": 0, "start": 0.0, "end": duration, "text": text}]
 
+    max_end_seconds = max([float(segment.get("end", 0.0)) for segment in segments] or [0.0])
+    timing_format = get_timing_format(max_end_seconds)
     cleaned = []
     for index, segment in enumerate(segments):
         segment_text = str(segment.get("text") or "").strip()
         if not segment_text:
             continue
+        start_seconds = float(segment.get("start", 0.0))
+        end_seconds = float(segment.get("end", 0.0))
         cleaned.append(
             {
                 "id": int(segment.get("id", index)),
-                "start": float(segment.get("start", 0.0)),
-                "end": float(segment.get("end", 0.0)),
+                "start": seconds_to_timecode(start_seconds, timing_format),
+                "end": seconds_to_timecode(end_seconds, timing_format),
+                "start_seconds": start_seconds,
+                "end_seconds": end_seconds,
                 "text": segment_text,
             }
         )
@@ -270,7 +309,10 @@ def synthesize_segments(segments: list[dict[str, Any]], params: dict[str, Any], 
         text = str(segment.get("voiceover_text") or segment.get("translated_text") or "").strip()
         if not text:
             continue
-        output = tts_dir / f"{index:04d}.mp3"
+        timing_format = get_timing_format(segment_end_seconds(segment))
+        start = str(segment.get("start", seconds_to_timecode(segment_start_seconds(segment), timing_format)))
+        end = str(segment.get("end", seconds_to_timecode(segment_end_seconds(segment), timing_format)))
+        output = tts_dir / f"{start}-{end}.mp3"
         logger.info("Synthesizing segment %s/%s with voice %s", index + 1, len(segments), voice)
         with client.audio.speech.with_streaming_response.create(
             model=model,
@@ -291,17 +333,39 @@ def mix_voiceover(source_mp3: Path, segments: list[dict[str, Any]], project: Pat
     output_dir = project / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
     background = AudioSegment.from_file(source_mp3) - float(os.getenv("VOICEOVER_BACKGROUND_REDUCTION_DB", "18"))
-    narration_only = AudioSegment.silent(duration=len(background))
-    mixed = background
+    narration_only = AudioSegment.silent(duration=0)
+    mixed = AudioSegment.silent(duration=0)
 
     for segment in segments:
         tts_path = segment.get("tts_path")
         if not tts_path:
             continue
         clip = AudioSegment.from_file(tts_path)
-        start_ms = max(0, int(float(segment.get("start", 0)) * 1000))
-        narration_only = narration_only.overlay(clip, position=start_ms)
-        mixed = mixed.overlay(clip, position=start_ms)
+        end_ms = max(0, int(segment_end_seconds(segment) * 1000))
+        target_start_ms = max(0, end_ms - len(clip))
+
+        # Match the legacy voiceover assembly: place clips as close as possible
+        # to their segment end, but append immediately if that would overlap.
+        current_ms = len(mixed)
+        if target_start_ms > current_ms:
+            gap = background[current_ms:target_start_ms]
+            mixed += gap
+            narration_only += AudioSegment.silent(duration=len(gap))
+        elif target_start_ms < current_ms:
+            logger.info(
+                "Adjusted overlapping voiceover chunk %s-%s from %sms to %sms",
+                segment.get("start"),
+                segment.get("end"),
+                target_start_ms,
+                current_ms,
+            )
+
+        mixed += clip
+        narration_only += clip
+
+    if len(mixed) < len(background):
+        mixed += background[len(mixed):]
+        narration_only += AudioSegment.silent(duration=len(background) - len(narration_only))
 
     narration_path = output_dir / "source.russian-narration.mp3"
     voiceover_path = output_dir / "source.voiceover.mp3"
@@ -368,21 +432,36 @@ def process_project(project: Path) -> None:
                 logger,
             )
 
-        if "improve" in stages:
-            update_status(project, "running", "improve", 62, "Improving translated text")
+        if "translate" in stages or "voiceover" in stages or "improve" in stages:
+            update_status(project, "running", "improve", 62, "Preparing improved transcript")
             segments = run_stage(project, manifest, "improve", lambda: improve_segments(segments, params, project, logger), logger)
 
         if "voiceover" in stages:
             update_status(project, "running", "voiceover", 75, "Generating voiceover audio")
             synthesized = run_stage(project, manifest, "tts", lambda: synthesize_segments(segments, params, project, logger), logger)
             voiceover_path = run_stage(project, manifest, "mix", lambda: mix_voiceover(source_mp3, synthesized, project, logger), logger)
-            manifest["artifacts"].append({"name": voiceover_path.name, "path": f"output/{voiceover_path.name}"})
+            manifest["artifacts"].append(
+                {
+                    "name": voiceover_path.name,
+                    "path": f"output/{voiceover_path.name}",
+                    "bytes": voiceover_path.stat().st_size,
+                }
+            )
 
         for artifact in (project / "output").glob("*"):
             if artifact.is_file():
                 item = {"name": artifact.name, "path": f"output/{artifact.name}", "bytes": artifact.stat().st_size}
-                if item not in manifest["artifacts"]:
+                if not any(existing.get("path") == item["path"] for existing in manifest["artifacts"]):
                     manifest["artifacts"].append(item)
+        improved_artifact = project / "work" / "source.improved.json"
+        if improved_artifact.exists():
+            manifest["artifacts"].append(
+                {
+                    "name": improved_artifact.name,
+                    "path": "work/source.improved.json",
+                    "bytes": improved_artifact.stat().st_size,
+                }
+            )
 
         manifest["completed_at"] = now_iso()
         write_json(project / "manifest.json", manifest)
