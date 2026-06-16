@@ -8,7 +8,7 @@
         "description": "The maximum number of characters per chunk when combining sentences into chunks."
     },
     "openai_model": {
-        "value": "gpt-5",
+        "value": "gpt-5.5",
         "description": "The OpenAI model to be used."
     },
     "window_size_for_timesync": {

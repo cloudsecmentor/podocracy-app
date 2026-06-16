@@ -12,6 +12,10 @@ def translate_openai(episode_in, target_lang="RU"):
     episode = [chunk for chunk in episode if chunk.get("text")]
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     model = get_params("openai_model")
+    if str(model).startswith("gpt-5"):
+        kwargs = {}
+    else:
+        kwargs = {"temperature": 0}
 
     for chunk in episode:
         text_content = chunk["text"]
@@ -22,7 +26,7 @@ def translate_openai(episode_in, target_lang="RU"):
                     {"role": "system", "content": "Translate the user's text. Return only the translation."},
                     {"role": "user", "content": f"Target language: {target_lang}\n\n{text_content}"},
                 ],
-                temperature=0,
+                **kwargs,
             )
             translated_text = response.choices[0].message.content.strip()
         except Exception as e:
