@@ -12,7 +12,7 @@ RUN apt-get update \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY local_worker.py worker_poll.py ./
+COPY worker_poll.py ./
 COPY processing_container ./processing_container
 COPY common ./common
 COPY frontend ./frontend

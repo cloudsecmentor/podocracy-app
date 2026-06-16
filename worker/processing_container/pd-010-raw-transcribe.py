@@ -199,10 +199,7 @@ def get_open_ai_transcript_text(audioFileName, openai_model_size, caffeinate = T
     import os
     import subprocess
     from signal import SIGKILL
-    # Prevent the system from going to sleep
-    # Start the caffeinate process
-    if caffeinate:
-        caffeinate_proc = subprocess.Popen(['caffeinate', '-i'])
+    caffeinate_proc = maybe_start_caffeinate(caffeinate)
 
     # Record the start time
     start_time = time.time()
@@ -230,9 +227,7 @@ def get_open_ai_transcript_text(audioFileName, openai_model_size, caffeinate = T
     # Print the elapsed time in hh:mm:ss format
     logging.info(f"Elapsed time: {elapsed_time_str} or  {elapsed_time:.4f} seconds")
 
-    # Terminate the caffeinate process
-    if caffeinate:
-        os.kill(caffeinate_proc.pid, SIGKILL)
+    maybe_stop_caffeinate(caffeinate_proc)
 
     return openai_result
     ##########################################
@@ -245,10 +240,7 @@ def get_whisper_api_transcript_text(audioFileName, caffeinate = True):
     import os
     import subprocess
     from signal import SIGKILL
-    # Prevent the system from going to sleep
-    # Start the caffeinate process
-    if caffeinate:
-        caffeinate_proc = subprocess.Popen(['caffeinate', '-i'])
+    caffeinate_proc = maybe_start_caffeinate(caffeinate)
 
     # Record the start time
     start_time = time.time()
@@ -282,9 +274,7 @@ def get_whisper_api_transcript_text(audioFileName, caffeinate = True):
     # Print the elapsed time in hh:mm:ss format
     logging.info(f"Elapsed time: {elapsed_time_str} or  {elapsed_time:.4f} seconds")
 
-    # Terminate the caffeinate process
-    if caffeinate:
-        os.kill(caffeinate_proc.pid, SIGKILL)
+    maybe_stop_caffeinate(caffeinate_proc)
 
     return openai_result
     ##########################################

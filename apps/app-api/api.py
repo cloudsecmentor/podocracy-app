@@ -83,12 +83,38 @@ def project_summary(path: Path) -> dict[str, Any]:
     }
 
 
+def source_path_for_project(root: Path) -> Path | None:
+    metadata = read_json(root / "metadata.json", {})
+    relative = metadata.get("source_path")
+    if relative:
+        source = root / relative
+        if source.exists():
+            return source
+    candidates = [item for item in (root / "input").glob("*") if item.is_file() and not item.name.endswith(".json")]
+    return candidates[0] if candidates else None
+
+
+def legacy_artifact_paths(root: Path) -> list[Path]:
+    source_path = source_path_for_project(root)
+    if source_path is None:
+        return []
+    excluded = {
+        source_path.name,
+        source_path.with_suffix(".params.json").name,
+    }
+    artifacts = []
+    for path in sorted(source_path.parent.glob(f"{source_path.stem}.*")):
+        if path.is_file() and path.name not in excluded and ".subtitles." not in path.name:
+            artifacts.append(path)
+    return artifacts
+
+
 def stage_mapping(stage_preset: str) -> str:
     if stage_preset == "full":
-        return "transcribe+translate+improve+voiceover"
+        return "transcribe+combine+timesync+translate+customize+improve+voiceover"
     if stage_preset == "translate-only":
-        return "transcribe+translate"
-    return "transcribe+translate+voiceover"
+        return "transcribe+combine+timesync+translate"
+    return "transcribe+combine+timesync+translate+customize+voiceover"
 
 
 def parse_optional_float(value: str, field_name: str, minimum: float | None = None, maximum: float | None = None) -> float | None:
@@ -165,7 +191,7 @@ def create_project(
     tts_api: str = Form("openai"),
     elevenlabs_voice_id: str = Form(""),
     voiceover_tempo: str = Form("1.2"),
-    voiceover_shift: str = Form(""),
+    voiceover_shift: str = Form("1.5"),
     normalize_final_audio: str = Form(""),
     max_preview_size_mb: str = Form("2"),
     use_subtitles_as_is: str = Form(""),
@@ -175,7 +201,7 @@ def create_project(
     whisper_silence_split: str = Form(""),
     whisper_silence_sec: str = Form("2"),
     max_char_chunk_per_sentence: str = Form("200"),
-    max_char_chunk: str = Form("700"),
+    max_char_chunk: str = Form("400"),
     improve_max_chunk_chars: str = Form("12000"),
 ) -> dict[str, Any]:
     if not source_url.strip() and (source is None or not source.filename):
@@ -224,7 +250,7 @@ def create_project(
 
     subtitle_relative = ""
     if subtitle_file and subtitle_file.filename:
-        subtitle_name = f"subtitles{Path(safe_name(subtitle_file.filename)).suffix.lower() or '.srt'}"
+        subtitle_name = f"{source_path.stem}.subtitles{Path(safe_name(subtitle_file.filename)).suffix.lower() or '.srt'}"
         subtitle_path = input_dir / subtitle_name
         with subtitle_path.open("wb") as handle:
             shutil.copyfileobj(subtitle_file.file, handle)
@@ -250,8 +276,8 @@ def create_project(
         "stages_to_run": stages_to_run,
         "whisper_api": True,
         "tts_api": parsed_tts_api,
-        "translation_text_key": "translated_text",
-        "improved_text_key": "voiceover_text",
+        "translation_text_key": "dltrans",
+        "improved_text_key": "imp",
         "speedup_value": 1.2,
         "normalize_final_audio": parse_optional_bool(normalize_final_audio),
         "use_subtitles_as_is": parse_optional_bool(use_subtitles_as_is),
@@ -261,9 +287,10 @@ def create_project(
         "whisper_silence_split": parse_optional_bool(whisper_silence_split),
         "whisper_silence_sec": parsed_whisper_silence_sec if parsed_whisper_silence_sec is not None else 2,
         "max_char_chunk_per_sentence": int(parsed_max_char_chunk_per_sentence or 200),
-        "max_char_chunk": int(parsed_max_char_chunk or 700),
+        "max_char_chunk": int(parsed_max_char_chunk or 400),
         "improve_max_chunk_chars": int(parsed_improve_max_chunk_chars or 12000),
         "max_preview_size_mb": parsed_max_preview_size_mb if parsed_max_preview_size_mb is not None else 2.0,
+        "max_video_file_size_mb": parsed_max_preview_size_mb if parsed_max_preview_size_mb is not None else 2.0,
     }
     if parsed_voiceover_tempo is not None:
         params["voiceover_tempo"] = parsed_voiceover_tempo
@@ -272,7 +299,8 @@ def create_project(
     if elevenlabs_voice_id.strip():
         params["elevenlabs_voice_id"] = elevenlabs_voice_id.strip()
     if subtitle_relative:
-        params["custom_subtitles"] = subtitle_relative
+        params["custom_subtitles"] = "true"
+        params["custom_subtitles_path"] = subtitle_relative
     if custom_recordings_relative:
         params["custom_recording"] = True
         params["custom_recordings_zip"] = custom_recordings_relative
@@ -289,7 +317,7 @@ def create_project(
         "stage_preset": stage_preset,
         "tts_api": parsed_tts_api,
         "voiceover_tempo": parsed_voiceover_tempo if parsed_voiceover_tempo is not None else 1.2,
-        "voiceover_shift": parsed_voiceover_shift if parsed_voiceover_shift is not None else 0,
+        "voiceover_shift": parsed_voiceover_shift if parsed_voiceover_shift is not None else 1.5,
         "custom_subtitles": bool(subtitle_relative),
         "custom_recording": bool(custom_recordings_relative),
         "normalize_final_audio": parse_optional_bool(normalize_final_audio),
@@ -320,10 +348,20 @@ def get_project(project_id: str) -> dict[str, Any]:
 def get_project_logs(project_id: str) -> str:
     root = project_path(project_id)
     logs = []
-    for log_path in sorted((root / "logs").glob("*.log")):
-        logs.append(f"===== {log_path.name} =====\n")
-        logs.append(log_path.read_text(encoding="utf-8", errors="replace")[-12000:])
-        logs.append("\n")
+    source_path = source_path_for_project(root)
+    log_dirs = [root / "logs"]
+    if source_path is not None:
+        log_dirs.append(source_path.parent / ".log")
+    for log_dir in log_dirs:
+        for log_path in sorted(log_dir.glob("*.log")):
+            logs.append(f"===== {log_path.relative_to(root)} =====\n")
+            logs.append(log_path.read_text(encoding="utf-8", errors="replace")[-12000:])
+            logs.append("\n")
+    for log_zip in legacy_artifact_paths(root):
+        if log_zip.name.endswith(".logs.zip"):
+            logs.append(f"===== {log_zip.relative_to(root)} =====\n")
+            logs.append("Legacy log bundle is available in artifacts.\n")
+            logs.append("\n")
     return "".join(logs) or "No logs yet.\n"
 
 
@@ -331,6 +369,15 @@ def get_project_logs(project_id: str) -> str:
 def get_artifacts(project_id: str) -> list[dict[str, Any]]:
     root = project_path(project_id)
     artifacts = []
+    for path in legacy_artifact_paths(root):
+        artifacts.append(
+            {
+                "name": path.name,
+                "path": str(path.relative_to(root)),
+                "bytes": path.stat().st_size,
+                "download_url": f"/api/projects/{project_id}/download/{path.name}",
+            }
+        )
     for path in sorted((root / "output").glob("*")):
         if path.is_file():
             artifacts.append(
@@ -361,6 +408,10 @@ def download_artifact(project_id: str, filename: str) -> FileResponse:
     artifact = root / "output" / safe_filename
     if not artifact.exists() and safe_filename in DOWNLOADABLE_WORK_FILES:
         artifact = root / "work" / safe_filename
+    if not artifact.exists():
+        source_path = source_path_for_project(root)
+        if source_path is not None:
+            artifact = source_path.parent / safe_filename
     if not artifact.exists() or not artifact.is_file():
         raise HTTPException(status_code=404, detail="Artifact not found")
     return FileResponse(path=artifact, filename=artifact.name)
@@ -371,6 +422,7 @@ def support_bundle(project_id: str) -> FileResponse:
     root = project_path(project_id)
     bundle_path = root / "output" / f"{project_id}.support.zip"
     with zipfile.ZipFile(bundle_path, "w", zipfile.ZIP_DEFLATED) as bundle:
+        source_path = source_path_for_project(root)
         for relative in [
             "metadata.json",
             "status.json",
@@ -384,4 +436,12 @@ def support_bundle(project_id: str) -> FileResponse:
                 bundle.write(path, relative)
         for log_path in (root / "logs").glob("*.log"):
             bundle.write(log_path, f"logs/{log_path.name}")
+        if source_path is not None:
+            params_path = source_path.with_suffix(".params.json")
+            if params_path.exists():
+                bundle.write(params_path, str(params_path.relative_to(root)))
+            for path in legacy_artifact_paths(root):
+                bundle.write(path, str(path.relative_to(root)))
+            for log_path in (source_path.parent / ".log").glob("*.log"):
+                bundle.write(log_path, str(log_path.relative_to(root)))
     return FileResponse(path=bundle_path, filename=bundle_path.name)

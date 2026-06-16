@@ -16,11 +16,7 @@ def improve_text_openai_2408(episode, key_name, improved_text_key = "imp", sleep
 
     import subprocess
     from signal import SIGKILL
-    # Prevent the system from going to sleep
-    # Start the caffeinate process
-    if caffeinate:
-        caffeinate_proc = subprocess.Popen(['caffeinate', '-i'])
-
+    caffeinate_proc = maybe_start_caffeinate(caffeinate)
 
     for chunk in tqdm(episode_new):
         logging.info(f"Original translated text: [{chunk[key_name]}]")
@@ -31,10 +27,7 @@ def improve_text_openai_2408(episode, key_name, improved_text_key = "imp", sleep
         time.sleep(sleep_time)
 
 
-    # Kill the caffeinate process
-    import os
-    if caffeinate:
-        os.kill(caffeinate_proc.pid, SIGKILL)
+    maybe_stop_caffeinate(caffeinate_proc)
 
     return episode_new
 

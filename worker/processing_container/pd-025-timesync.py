@@ -64,7 +64,11 @@ def get_speakers_list_from_transript_text(text, max_size=10000):
         except ValidationError:
             # If that fails, it might be a raw list. Validate as a list of strings.
             list_adapter = TypeAdapter(list[str])
-            res = list_adapter.validate_json(raw_response)
+            try:
+                res = list_adapter.validate_json(raw_response)
+            except ValidationError:
+                logging.info(f"No speakers identified in transcript; continuing without speaker split")
+                res = []
 
     except ValidationError as e:
         # This will catch validation errors from the second attempt if both fail.
@@ -136,6 +140,9 @@ def split_text_by_speaker(text, speakers_list):
     :return: A list of dictionaries with 'speaker' and 'text' keys.
     """
     formatted_transcript = []
+    if not speakers_list:
+        return [{"speaker": "default", "text": text.strip()}]
+
     current_speaker = None
     current_text = ""
 
@@ -352,6 +359,7 @@ def main(path):
     setup_logging_with_appinsights(path)
     path_raw = naming_convention(path, "raw")
     path_proofread = naming_convention(path, "proofread")
+    path_transcript = naming_convention(path, "transcript")
 
     import json
     try:
@@ -361,15 +369,17 @@ def main(path):
         exit(1)
 
 
-    try:
-        transript_text = get_palintext_content(path_proofread) 
-        logging.info(f"transript_text: {transript_text[:10]}")
-    except Exception as e:
-        logging.error(f"Can't get proofread text: [{e}]")
-        exit(1)
+    transript_text = ""
+    for text_path, label in ((path_proofread, "proofread"), (path_transcript, "transcript")):
+        try:
+            transript_text = get_palintext_content(text_path)
+            logging.info(f"Using {label} text from {text_path}")
+            break
+        except Exception as e:
+            logging.info(f"No {label} text at {text_path}: {e}")
 
     if not transript_text:
-        logging.error(f"Proofread text is empty")
+        logging.error("Can't get proofread or transcript text")
         exit(1)
 
 

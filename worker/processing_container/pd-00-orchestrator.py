@@ -263,22 +263,31 @@ def main(path, time2sleep=0):
 
 
     stages_list = stages.split("+")
+    stages_set = set(stages_list)
+    if stages != "all":
+        if stages_set & {"translate", "improve", "voiceover"}:
+            stages_set.update({"combine", "timesync"})
+        if "improve" in stages_set:
+            stages_set.add("customize")
+        if "voiceover" in stages_set:
+            stages_set.update({"improve", "translate"})
     logging.info(f"Stages to execute: {stages_list}")
 
     # Running each script with its arguments
     total_stages = len(scripts)
+    stage_failures: list[str] = []
 
     for current_stage_count, (stage, script, args) in enumerate(scripts):
-        if stage not in stages_list and stages != "all":
+        if stage not in stages_set and stages != "all":
             logging.info(f"Skipping stage [{stage}]: {script} with args: {args}")
             continue
         
         # Calculate progress as the ratio of current stage count to total stages
         progress = int((current_stage_count / total_stages) * 100)
         
-        # Update the status to the current stage and the calculated progress
-        update_status(user_id=user_id, project_id=base_name, state=stage, progress=progress)
-        
+        # Local worker uses status.json; skip remote API status updates when API_URI is unset.
+        # update_status(user_id=user_id, project_id=base_name, state=stage, progress=progress)
+
         logging.info(f"Running stage [{stage}]: {script} with args: {args}, timestamp: [{get_timestamp()}]")
         try:
             log_dir = f"{get_local_processing_directory()}/.log"
@@ -296,6 +305,7 @@ def main(path, time2sleep=0):
                 f.write(result.stdout or "")
 
             if result.returncode != 0:
+                stage_failures.append(stage)
                 tail = (result.stdout or "")[-2000:]
                 logging.error(
                     f"Stage [{stage}] failed with return code {result.returncode}. "
@@ -305,11 +315,15 @@ def main(path, time2sleep=0):
                 logging.info(f"Stage [{stage}] completed successfully. Log: {stage_log_path}")
 
         except Exception as e:
+            stage_failures.append(stage)
             logging.error(f"Failed to run stage [{stage}]: {script} with args: {args}, error: {e}")
 
-    # After all stages are completed, update the status to "completed" and progress to 100
-    update_status(user_id=user_id, project_id=base_name, state="completed", progress=100)
+    if stage_failures:
+        logging.error(f"Pipeline failed stages: {stage_failures}")
+        collect_logs_and_data(path)
+        sys.exit(1)
 
+    # update_status(user_id=user_id, project_id=base_name, state="completed", progress=100)
 
     # ## slip a few  minutes
     logging.info(f"Slipping {time2sleep} minutes post processing")

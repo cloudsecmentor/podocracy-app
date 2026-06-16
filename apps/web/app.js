@@ -57,6 +57,21 @@ function renderProjects(projects) {
   }
 }
 
+function scrollLogsToBottom() {
+  const logs = detailEl.querySelector("pre");
+  if (!logs) return;
+  logs.scrollTop = logs.scrollHeight;
+}
+
+function scheduleScrollLogsToBottom() {
+  requestAnimationFrame(() => {
+    scrollLogsToBottom();
+    requestAnimationFrame(scrollLogsToBottom);
+  });
+  setTimeout(scrollLogsToBottom, 0);
+  setTimeout(scrollLogsToBottom, 100);
+}
+
 async function renderDetail(project) {
   const status = project.status || {};
   const metadata = project.metadata || {};
@@ -76,6 +91,7 @@ async function renderDetail(project) {
     <h2 style="margin-top:18px">Logs</h2>
     <pre>${logs.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[char]))}</pre>
   `;
+  scheduleScrollLogsToBottom();
 }
 
 async function loadProjects() {
@@ -84,7 +100,10 @@ async function loadProjects() {
   renderProjects(projects);
   if (selectedProject) {
     const project = projects.find((item) => item.id === selectedProject);
-    if (project) await renderDetail(project);
+    if (project) {
+      await renderDetail(project);
+      scheduleScrollLogsToBottom();
+    }
   }
 }
 

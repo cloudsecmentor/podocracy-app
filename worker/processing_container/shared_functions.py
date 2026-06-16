@@ -7,6 +7,7 @@ import subprocess
 from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 from dotenv import load_dotenv
 import pytz
+import shutil
 import sys
 import os
 import requests
@@ -21,6 +22,23 @@ API_URI = os.getenv("API_URI")
 
 blob_storage_logger = logging.getLogger('azure')
 blob_storage_logger.setLevel(logging.WARNING)
+
+
+def maybe_start_caffeinate(enabled: bool = True):
+    if not enabled:
+        return None
+    if not shutil.which("caffeinate"):
+        return None
+    return subprocess.Popen(["caffeinate", "-i"])
+
+
+def maybe_stop_caffeinate(caffeinate_proc) -> None:
+    if caffeinate_proc is None:
+        return
+    from signal import SIGKILL
+    import os
+    os.kill(caffeinate_proc.pid, SIGKILL)
+
 
 def get_timestamp():
     from datetime import datetime as dt
@@ -259,11 +277,13 @@ def convert_seconds_format(seconds, format):
         return convert_seconds_mmss(seconds)
 # convert seconds to string in format mmss
 def convert_seconds_mmss (time_seconds):
-    str_time = str(int(float(time_seconds)//60)).zfill(2) + str(round(float(time_seconds)%60)).zfill(2)
+    total_seconds = max(0, float(time_seconds))
+    str_time = str(int(total_seconds//60)).zfill(2) + str(round(total_seconds%60)).zfill(2)
     return str_time
 
 def convert_seconds_hhmmss (time_seconds):
-    str_time = str(int(float(time_seconds)//3600)).zfill(2) + str(int(float(time_seconds)%3600//60)).zfill(2) + str(round(float(time_seconds)%60)).zfill(2)
+    total_seconds = max(0, float(time_seconds))
+    str_time = str(int(total_seconds//3600)).zfill(2) + str(int(total_seconds%3600//60)).zfill(2) + str(round(total_seconds%60)).zfill(2)
     return str_time
 
 def convert_hhmmss_mmss_to_seconds(time: str):
@@ -912,9 +932,7 @@ def improve_text_openai(episode, key_name, improved_text_key="imp", sleep_time=0
     import subprocess
     from signal import SIGKILL
 
-    # Prevent the system from going to sleep
-    if caffeinate:
-        caffeinate_proc = subprocess.Popen(['caffeinate', '-i'])
+    caffeinate_proc = maybe_start_caffeinate(caffeinate)
 
     max_length_megachunk = int(get_params("improve_output_tokens_max") * get_params("improve_tokens_to_use_for_input_fraction"))
     # Limit megachunk to a max length of 90 to avoid exceeding schema limits
@@ -987,10 +1005,7 @@ def improve_text_openai(episode, key_name, improved_text_key="imp", sleep_time=0
                 del chunk[key_name]
         time.sleep(sleep_time)
 
-    # Kill the caffeinate process
-    import os
-    if caffeinate:
-        os.kill(caffeinate_proc.pid, SIGKILL)
+    maybe_stop_caffeinate(caffeinate_proc)
 
     return episode_new
 
@@ -1071,6 +1086,23 @@ When you are finished, provide the improved texts as a JSON dictionary with the 
 
 
 
+def word_entry_get(word_entry, key):
+    if isinstance(word_entry, dict):
+        return word_entry[key]
+    return getattr(word_entry, key)
+
+
+def normalize_word_entries(words):
+    return [
+        word if isinstance(word, dict) else {
+            "word": word_entry_get(word, "word"),
+            "start": word_entry_get(word, "start"),
+            "end": word_entry_get(word, "end"),
+        }
+        for word in words
+    ]
+
+
 def add_start_end_times_to_transcript(transcript_redacted_words, transcript_raw_words, window_size):
     import string
     """
@@ -1088,6 +1120,7 @@ def add_start_end_times_to_transcript(transcript_redacted_words, transcript_raw_
     """
     import copy
     transcript_words = copy.deepcopy(transcript_redacted_words) # Make a copy of the transcript_words to avoid modifying the original list
+    transcript_raw_words = normalize_word_entries(transcript_raw_words)
 
 
     # how_many_windows_to_search

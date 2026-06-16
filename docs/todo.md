@@ -36,9 +36,9 @@
   - Legacy source: `pd-010-02-whisper-api-transcribe.py`, `pd-020-combine.py`, and `pd-025-timesync.py` split audio, preserve word timings, align chunks, and support long-file `hhmmss`.
   - Current behavior: portal can split transcription audio by max length or silence, request detailed word timestamps, recombine words into sentence/chunks, and keep long-file `hhmmss` output.
 
-- [ ] Restore speaker-aware proofread/timesync alignment.
+- [x] Restore speaker-aware proofread/timesync alignment.
   - Legacy source: `pd-025-timesync.py` detects speakers from proofread transcript text, splits by speaker, aligns proofread words back to raw word timings, and fills missing timings.
-  - Current gap: portal now has word-level raw timing and chunk recombine, but does not yet run the speaker-aware proofread/timesync path.
+  - Current state: the portal worker now runs the legacy orchestrator path directly, so the legacy timesync stage is back in the processing flow.
 
 - [x] Restore customization stage behavior.
   - Legacy source: `pd-035-customize.py` can generate custom improvement instructions before `pd-040-improve.py`.
@@ -49,5 +49,5 @@
   - Current gap: portal only lowers the background by `VOICEOVER_BACKGROUND_REDUCTION_DB` and exports MP3; it does not expose normalization/limiter settings.
 
 - [ ] Restore full legacy parameter surface where still relevant.
-  - Examples: `sleep_time_tts`, `whisper_chunk_length_sec`, `whisper_silence_split`, `whisper_silence_sec`, `translation_text_key`, `improved_text_key`, `custom_subtitles`, and preview-size settings.
-  - Current gap: portal exposes the main transcription/chunking/improvement/voiceover params, but still does not cover every legacy `parameters.json` option.
+  - Examples still not surfaced: `sleep_time_tts`, `openai_model`, `openai_model_tts`, `whisper_default_model_local`, `window_size_for_timesync`, `time_delta_max_for_timesync`, `deepl_delay`, `whisper_api_max_size_mp3`, `number_of_issues_to_find`, `improve_openai_model`, and `improve_openai_temperature`.
+  - Current gap: the portal covers the main workflow params and some legacy defaults, but not every `parameters.json` option yet.
