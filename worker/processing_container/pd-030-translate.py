@@ -2,6 +2,38 @@ import time
 from shared_functions import *
 
 
+def translate_openai(episode_in, target_lang="RU"):
+    import copy
+    import os
+
+    from openai import OpenAI
+
+    episode = copy.deepcopy(episode_in)
+    episode = [chunk for chunk in episode if chunk.get("text")]
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    model = get_params("openai_model")
+
+    for chunk in episode:
+        text_content = chunk["text"]
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "Translate the user's text. Return only the translation."},
+                    {"role": "user", "content": f"Target language: {target_lang}\n\n{text_content}"},
+                ],
+                temperature=0,
+            )
+            translated_text = response.choices[0].message.content.strip()
+        except Exception as e:
+            logging.error(f"translate_openai: Error translating text: {e}")
+            translated_text = text_content
+
+        translation_key = get_params("translation_text_key")
+        chunk[translation_key] = translated_text
+
+    return episode
+
 
 def translate_deepl(episode_in, target_lang="RU", deepl_delay=0.5):
     import deepl
@@ -58,8 +90,12 @@ def main(path):
 
     target_lang =  format_deepl_target_lang( get_params("language", path) )
     deepl_delay = float(get_params("deepl_delay", path))
-    logging.info(f"Translating to target language: [{target_lang}]")
-    transcript_translated = translate_deepl(transcript_combined, target_lang, deepl_delay)
+    translation_provider = str(get_params("translation_provider", path)).strip().lower()
+    logging.info(f"Translating to target language: [{target_lang}] using provider [{translation_provider}]")
+    if translation_provider == "openai":
+        transcript_translated = translate_openai(transcript_combined, target_lang)
+    else:
+        transcript_translated = translate_deepl(transcript_combined, target_lang, deepl_delay)
     logging.info(f"Translated to target language: [{target_lang}]")
 
 

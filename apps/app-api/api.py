@@ -276,6 +276,7 @@ def create_project(
         "stages_to_run": stages_to_run,
         "whisper_api": True,
         "tts_api": parsed_tts_api,
+        "translation_provider": "openai",
         "translation_text_key": "dltrans",
         "improved_text_key": "imp",
         "speedup_value": 1.2,

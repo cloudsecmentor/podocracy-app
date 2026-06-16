@@ -27,6 +27,10 @@
         "value": 0.5,
         "description": "Delay between requests to Deepl API."
     },
+    "translation_provider": {
+        "value": "openai",
+        "description": "Translation provider to use. Options: 'deepl' or 'openai'."
+    },
     "translation_text_key": {
         "value": "dltrans",
         "description": "Key for translation text."
