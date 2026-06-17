@@ -146,7 +146,7 @@ function workspaceHtml() {
       <button type="button" id="save-improved" ${state.isSaving ? "disabled" : ""}>${state.isSaving ? "Saving..." : "Save"}</button>
       <button type="button" id="add-chunk" class="secondary" ${state.isSaving || state.rawFallback !== null ? "disabled" : ""}>Add chunk</button>
       <a class="artifact" href="${downloadHref}" ${improvedFilename ? "" : 'aria-disabled="true" tabindex="-1"'} download>Download</a>
-      <a class="artifact" href="${openHref}" ${improvedFilename ? "" : 'aria-disabled="true" tabindex="-1"'}>Open improved page</a>
+      <a class="artifact" href="${openHref}" ${improvedFilename ? "" : 'aria-disabled="true" tabindex="-1"'}>Open editor</a>
       <button type="button" id="start-voiceover" class="secondary" ${state.isSaving ? "disabled" : ""}>Start voiceover</button>
       <a class="secondary" href="/">Back</a>
       <span class="badge">${chunkCount}</span>
@@ -273,6 +273,8 @@ function bindWorkspace() {
 function render() {
   workspace.innerHTML = workspaceHtml();
   bindWorkspace();
+  const topStatus = document.querySelector("#project-status");
+  if (topStatus) topStatus.textContent = state.error || state.projectStatus;
 }
 
 async function save() {

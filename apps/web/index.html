@@ -3,45 +3,46 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Podocracy Worker Portal</title>
+    <title>Podocracy — Voiceover Translation Studio</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Hanken+Grotesk:wght@400;500;600;700&display=swap">
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
     <main class="shell">
-      <header class="topbar">
-        <div>
-          <h1>Podocracy Worker Portal</h1>
-          <p id="provider-status">Checking providers...</p>
+      <header class="topbar reveal">
+        <div class="brand">
+          <span class="eyebrow">Voiceover Translation Studio</span>
+          <h1>Podocracy</h1>
+          <p class="tagline">Turn source audio into a translated, natural-sounding voiceover &mdash; transcribed, translated, refined, and spoken in the language you choose.</p>
+          <div id="provider-status" class="providers" aria-live="polite">Checking providers&hellip;</div>
         </div>
-        <button id="refresh">Refresh</button>
+        <div class="topbar-actions">
+          <button id="refresh" class="secondary" type="button">Refresh</button>
+        </div>
       </header>
 
-      <section class="panel">
-        <h2>New Project</h2>
+      <section class="panel reveal">
+        <h2>New project</h2>
+        <p id="form-message" class="message" role="status" aria-live="polite"></p>
         <form id="project-form">
           <input type="hidden" name="translation_provider" value="openai">
-          <label>
-            Source media
-            <input type="file" name="source" accept=".mp3,.mp4,.m4a,.wav,.url,audio/*,video/*">
-          </label>
 
-          <label>
-            Source URL
-            <input type="url" name="source_url" placeholder="https://...">
-          </label>
-
-          <div class="inline-row">
+          <div class="field-pair">
             <label>
-              BEMA episode
-              <input type="number" name="bema_episode" min="1" placeholder="34">
+              Source media
+              <input type="file" name="source" accept=".mp3,.mp4,.m4a,.wav,.url,audio/*,video/*">
             </label>
-            <button type="button" id="import-bema" class="secondary">Import BEMA</button>
+            <label>
+              Or paste a link
+              <input type="url" name="source_url" placeholder="https://...">
+            </label>
           </div>
-          <p class="muted">Downloads the episode MP3 and transcript into a new project.</p>
 
           <div class="grid">
             <label>
-              Target language
+              Translate into
               <select name="language">
                 <option value="EN" selected>English (EN)</option>
                 <option value="RU">Russian (RU)</option>
@@ -56,43 +57,19 @@
             </label>
 
             <label>
-              Voice
+              Narrator voice
               <select name="voice">
-                <option value="alloy" selected>alloy</option>
-                <option value="verse">verse</option>
-                <option value="coral">coral</option>
-                <option value="sage">sage</option>
+                <option value="alloy" selected>Alloy</option>
+                <option value="verse">Verse</option>
+                <option value="coral">Coral</option>
+                <option value="sage">Sage</option>
               </select>
-            </label>
-
-            <label>
-              Voiceover tempo
-              <input type="number" name="voiceover_tempo" min="0.5" max="2" step="0.05" value="1.2">
-              <span class="muted">1.0 = normal; legacy default is 1.2</span>
-            </label>
-
-            <label>
-              Voiceover shift
-              <input type="number" name="voiceover_shift" min="-300" max="300" step="0.1" value="1.5">
-              <span class="muted">Seconds; positive moves narration later</span>
-            </label>
-
-            <label>
-              Sentence size
-              <input type="number" name="max_char_chunk_per_sentence" min="20" max="5000" step="10" value="200">
-              <span class="muted">Max chars before sentence break</span>
-            </label>
-
-            <label>
-              Transcript chunk
-              <input type="number" name="max_char_chunk" min="50" max="20000" step="50" value="400">
-              <span class="muted">Max chars per translated chunk</span>
             </label>
           </div>
 
           <div class="stage-picker">
             <div class="stage-picker-header">
-              <strong>Stages</strong>
+              <h3>Pipeline stages</h3>
               <div class="stage-picker-actions">
                 <button type="button" class="secondary" id="stages-select-all">Select all</button>
                 <button type="button" class="secondary" id="stages-deselect-all">Deselect all</button>
@@ -105,44 +82,95 @@
               <label><input type="checkbox" name="stage" value="improve" checked> Improve</label>
               <label><input type="checkbox" name="stage" value="voiceover" checked> Voiceover</label>
             </div>
-            <p class="muted">Select all or deselect all, then fine-tune the pipeline.</p>
-          </div>
-
-          <div class="grid">
-            <label>
-              Subtitles
-              <input type="file" name="subtitle_file" accept=".srt,.vtt,.sbv,.txt">
-            </label>
-
-            <label>
-              Custom recordings ZIP
-              <input type="file" name="custom_recordings" accept=".zip">
-            </label>
+            <p class="muted">Run the whole pipeline, or pick the steps you need.</p>
           </div>
 
           <label>
             Custom instructions
-            <textarea name="custom_instructions" rows="3" placeholder="Optional style, terminology, or pronunciation notes"></textarea>
+            <textarea name="custom_instructions" rows="3" placeholder="Optional: tone, terminology, names, or pronunciation notes"></textarea>
           </label>
 
-          <label class="check">
-            <input type="checkbox" name="autogenerate_custom_instructions">
-            Autogenerate improved instructions and append them to the custom instructions
-          </label>
+          <details class="advanced">
+            <summary>Advanced settings <span class="muted">&mdash; timing, chunking, extra files</span></summary>
+            <div class="advanced-body">
+              <div class="grid">
+                <label>
+                  Voiceover speed
+                  <input type="number" name="voiceover_tempo" min="0.5" max="2" step="0.05" value="1.2">
+                  <span class="muted">1.0 = normal; default 1.2</span>
+                </label>
 
-          <button type="submit">Create Project</button>
+                <label>
+                  Narration timing offset
+                  <input type="number" name="voiceover_shift" min="-300" max="300" step="0.1" value="1.5">
+                  <span class="muted">Seconds; positive starts narration later</span>
+                </label>
+
+                <label>
+                  Max sentence length
+                  <input type="number" name="max_char_chunk_per_sentence" min="20" max="5000" step="10" value="200">
+                  <span class="muted">Characters before a sentence break</span>
+                </label>
+
+                <label>
+                  Translation chunk size
+                  <input type="number" name="max_char_chunk" min="50" max="20000" step="50" value="400">
+                  <span class="muted">Characters per translated chunk</span>
+                </label>
+              </div>
+
+              <div class="field-pair">
+                <label>
+                  Subtitle file
+                  <input type="file" name="subtitle_file" accept=".srt,.vtt,.sbv,.txt">
+                </label>
+
+                <label>
+                  Custom recordings (ZIP)
+                  <input type="file" name="custom_recordings" accept=".zip">
+                </label>
+              </div>
+
+              <label class="check">
+                <input type="checkbox" name="autogenerate_custom_instructions">
+                <span>Auto-generate improved instructions and append them to the custom instructions above</span>
+              </label>
+
+              <div class="inline-row">
+                <label>
+                  Import from BEMA episode
+                  <input type="number" name="bema_episode" min="1" placeholder="34">
+                </label>
+                <button type="button" id="import-bema" class="secondary">Import episode</button>
+              </div>
+              <p class="muted">Downloads the episode audio and transcript into a new project.</p>
+            </div>
+          </details>
+
+          <button type="submit">Create project</button>
         </form>
       </section>
 
       <section class="split">
         <div class="panel">
           <h2>Projects</h2>
-          <div id="projects" class="projects"></div>
+          <div id="projects" class="projects">
+            <div class="skeleton">
+              <div class="skeleton-row"></div>
+              <div class="skeleton-row"></div>
+              <div class="skeleton-row"></div>
+            </div>
+          </div>
         </div>
 
         <div class="panel">
-          <h2>Project Detail</h2>
-          <div id="detail" class="detail empty">Select a project.</div>
+          <h2>Project detail</h2>
+          <div id="detail" class="detail">
+            <div class="empty-state">
+              <span class="empty-illo">[ &middot; &middot; &middot; &middot; &middot; ]</span>
+              <p class="empty">Select a project to follow its pipeline, edit the transcript, and download artifacts.</p>
+            </div>
+          </div>
         </div>
       </section>
     </main>
