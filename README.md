@@ -4,6 +4,11 @@ Self-hosted Docker Compose portal for creating local voiceover translation proje
 
 ## Quick Start With Prebuilt Images
 
+Install Docker first:
+
+- macOS/Windows: [Docker Desktop](https://www.docker.com/products/docker-desktop/)
+- Linux: [Docker Engine](https://docs.docker.com/engine/install/)
+
 Create an app folder:
 
 ```bash
@@ -15,19 +20,6 @@ Create `.env` in that folder:
 
 ```env
 OPENAI_API_KEY=replace-with-your-openai-key
-DEEPL_AUTH_KEY=
-ELEVENLABS_API_KEY=
-
-PORTAL_HTTP_PORT=8080
-PORTAL_ADMIN_PASSWORD=
-WORKER_POLL_SECONDS=3
-
-PODOCRACY_PROJECTS_DIR=./projects
-PODOCRACY_IMAGE_TAG=latest
-
-OPENAI_TRANSCRIBE_MODEL=whisper-1
-OPENAI_TTS_MODEL=gpt-4o-mini-tts
-OPENAI_TTS_VOICE=alloy
 ```
 
 Download the prebuilt-image Compose file:
@@ -51,7 +43,7 @@ docker compose --env-file .env -f docker-compose.images.yml pull
 docker compose --env-file .env -f docker-compose.images.yml up -d
 ```
 
-Project files stay in `./projects` because `.env` sets `PODOCRACY_PROJECTS_DIR=./projects`.
+Project files stay in `./projects` by default. Set `PODOCRACY_PROJECTS_DIR` in `.env` only if you want a different storage path.
 
 ## Local Source Run
 

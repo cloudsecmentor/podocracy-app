@@ -69,19 +69,6 @@ Create `.env` in that folder:
 
 ```env
 OPENAI_API_KEY=replace-with-your-openai-key
-DEEPL_AUTH_KEY=
-ELEVENLABS_API_KEY=
-
-PORTAL_HTTP_PORT=8080
-PORTAL_ADMIN_PASSWORD=
-WORKER_POLL_SECONDS=3
-
-PODOCRACY_PROJECTS_DIR=./projects
-PODOCRACY_IMAGE_TAG=v0.1.1
-
-OPENAI_TRANSCRIBE_MODEL=whisper-1
-OPENAI_TTS_MODEL=gpt-4o-mini-tts
-OPENAI_TTS_VOICE=alloy
 ```
 
 Run:
@@ -116,7 +103,7 @@ Pinned versions are better for support and reproducibility. `latest` is useful f
 The app stores project files under `/data/projects` inside the API and worker containers. Compose maps that path to a host directory:
 
 ```yaml
-${PODOCRACY_PROJECTS_DIR:-./data/projects}:/data/projects
+${PODOCRACY_PROJECTS_DIR:-./projects}:/data/projects
 ```
 
 Project files survive:
@@ -128,7 +115,7 @@ Project files survive:
 - source rebuilds
 - switching from `v0.1.0` to `v0.1.1`
 
-Project files do not automatically follow users to a different checkout folder when `PODOCRACY_PROJECTS_DIR` is left at the default `./data/projects`. For durable installs, set `PODOCRACY_PROJECTS_DIR` to an absolute path outside the repo, for example:
+Project files do not automatically follow users to a different install folder when `PODOCRACY_PROJECTS_DIR` is left at the prebuilt-image default `./projects`. For durable installs, set `PODOCRACY_PROJECTS_DIR` to an absolute path outside the install folder, for example:
 
 ```bash
 export PODOCRACY_PROJECTS_DIR="$HOME/podocracy-projects"
