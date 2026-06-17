@@ -2,7 +2,27 @@ import time
 from shared_functions import *
 
 
-def translate_openai(episode_in, target_lang="RU"):
+LANGUAGE_NAMES = {
+    "EN": "English",
+    "RU": "Russian",
+    "UK": "Ukrainian",
+    "JA": "Japanese",
+    "ZH": "Chinese",
+    "ES": "Spanish",
+    "FR": "French",
+    "DE": "German",
+    "IT": "Italian",
+}
+
+
+def language_name_for_prompt(language):
+    normalized = str(language or "EN").strip().upper()
+    if "(" in normalized:
+        normalized = normalized.split("(")[-1].split(")")[0].strip().upper()
+    return LANGUAGE_NAMES.get(normalized, normalized)
+
+
+def translate_openai(episode_in, target_lang="EN"):
     import copy
     import os
 
@@ -24,7 +44,7 @@ def translate_openai(episode_in, target_lang="RU"):
                 model=model,
                 messages=[
                     {"role": "system", "content": "Translate the user's text. Return only the translation."},
-                    {"role": "user", "content": f"Target language: {target_lang}\n\n{text_content}"},
+                    {"role": "user", "content": f"Target language: {language_name_for_prompt(target_lang)}\n\n{text_content}"},
                 ],
                 **kwargs,
             )
@@ -39,7 +59,7 @@ def translate_openai(episode_in, target_lang="RU"):
     return episode
 
 
-def translate_deepl(episode_in, target_lang="RU", deepl_delay=0.5):
+def translate_deepl(episode_in, target_lang="EN", deepl_delay=0.5):
     import deepl
     import os
     import dotenv

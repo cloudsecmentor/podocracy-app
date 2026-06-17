@@ -340,6 +340,8 @@ def naming_convention(path, file_type):
             return f"{path_without_ext}.translated.json"
         case "improved":
             return f"{path_without_ext}.improved.json"
+        case "custom_instructions":
+            return f"{path_without_ext}.custom-instructions.txt"
         case "subtitles_base":
             return f"{path_without_ext}.subtitles"
         case "logs.zip":
@@ -494,7 +496,7 @@ def read_project_params(path):
             logging.info (f"File '{params_file_name}' does not exist, using default_params")
 
             default_params = {
-                "language": "RU",
+                "language": "EN",
                 "stages_to_run": "all",
                 }
             return default_params

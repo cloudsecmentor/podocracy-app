@@ -293,6 +293,10 @@ def main(path):
         # logging.info(f"Using default custom instructions [{custom_instructions[:100]}...]")
         logging.info(f"Using default custom instructions [{custom_instructions}...]")
 
+    path_custom_instructions = naming_convention(path, "custom_instructions")
+    with open(path_custom_instructions, "w", encoding="utf-8") as file:
+        file.write(custom_instructions)
+
     logging.info(f"Improving translation of file : [{path_translated}]")
     transcript_improved = improve_text_openai (
         episode=transcript_translated, 

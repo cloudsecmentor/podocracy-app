@@ -20,6 +20,17 @@ WORKER_VERSION = "local-worker-0.3.0"
 DEFAULT_SPEEDUP_VALUE = 1.2
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
 CUSTOM_RECORDING_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".webm"}
+LANGUAGE_NAMES = {
+    "EN": "English",
+    "RU": "Russian",
+    "UK": "Ukrainian",
+    "JA": "Japanese",
+    "ZH": "Chinese",
+    "ES": "Spanish",
+    "FR": "French",
+    "DE": "German",
+    "IT": "Italian",
+}
 
 
 def now_iso() -> str:
@@ -616,21 +627,27 @@ def get_subtitle_path(project: Path, params: dict[str, Any]) -> Path | None:
 
 
 def normalize_language(language: str) -> str:
-    language = (language or "RU").strip()
+    language = (language or "EN").strip()
     if "(" in language:
         language = language.split("(")[-1].split(")")[0].strip()
     return language.upper()
 
 
+def language_name_for_prompt(language: str) -> str:
+    normalized = normalize_language(language)
+    return LANGUAGE_NAMES.get(normalized, normalized)
+
+
 def translate_with_openai(text: str, target_language: str) -> str:
     from openai import OpenAI
 
+    target_name = language_name_for_prompt(target_language)
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     response = client.chat.completions.create(
         model=os.getenv("OPENAI_TRANSLATE_MODEL", "gpt-4o-mini"),
         messages=[
             {"role": "system", "content": "Translate the user's text. Return only the translation."},
-            {"role": "user", "content": f"Target language: {target_language}\n\n{text}"},
+            {"role": "user", "content": f"Target language: {target_name}\n\n{text}"},
         ],
         temperature=0,
     )
@@ -688,6 +705,8 @@ def improve_segments(segments: list[dict[str, Any]], params: dict[str, Any], pro
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     model = os.getenv("OPENAI_IMPROVE_MODEL", str(params.get("improve_openai_model") or "gpt-5"))
     instructions = str(params.get("custom_instructions") or "").strip()
+    instructions_path = project / "work" / "source.custom-instructions.txt"
+    instructions_path.write_text(instructions, encoding="utf-8")
     max_chars = param_int(params, "improve_max_chunk_chars", 12000)
     max_items = param_int(params, "improve_max_chunk_items", 90)
     sleep_time = param_float(params, "sleep_time_improve", 0.5)
@@ -766,12 +785,26 @@ Guidelines:
     return improved
 
 
+def load_improved_segments(project: Path, logger: logging.Logger) -> list[dict[str, Any]]:
+    improved_path = project / "work" / "source.improved.json"
+    if not improved_path.exists():
+        raise FileNotFoundError("source.improved.json is missing")
+    improved = read_json(improved_path, [])
+    if not isinstance(improved, list):
+        raise ValueError("source.improved.json must contain a list of chunks")
+    logger.info("Loaded %s improved chunks for voiceover resume", len(improved))
+    return improved
+
+
 def combine_segment_text(segments: list[dict[str, Any]], key: str) -> str:
     return " ".join(str(segment.get(key) or "").strip() for segment in segments).strip()
 
 
 def customize_instructions(segments: list[dict[str, Any]], params: dict[str, Any], project: Path, logger: logging.Logger) -> dict[str, Any]:
+    existing = str(params.get("custom_instructions") or "").strip()
+    instructions_path = project / "work" / "source.custom-instructions.txt"
     if not parse_legacy_bool(params.get("autogenerate_custom_instructions", False)):
+        instructions_path.write_text(existing, encoding="utf-8")
         return params
 
     from openai import OpenAI
@@ -779,7 +812,6 @@ def customize_instructions(segments: list[dict[str, Any]], params: dict[str, Any
     original_text = combine_segment_text(segments, "text")
     translation_key = str(params.get("translation_text_key") or "translated_text")
     translated_text = combine_segment_text(segments, translation_key)
-    existing = str(params.get("custom_instructions") or "").strip()
     number_of_issues = int(params.get("number_of_issues_to_find", 50))
     style_instruction = (
         f"\n\nThe user provided these instructions:\n{existing}\nGenerate additional concrete instructions in the same style."
@@ -812,7 +844,8 @@ Limit the list to no more than {number_of_issues} issues. Return only the instru
     )
     generated = response.choices[0].message.content.strip()
     updated = dict(params)
-    updated["custom_instructions"] = f"{existing}\n--------------\n{generated}".strip()
+    updated["custom_instructions"] = "\n--------------\n".join(part for part in (existing, generated) if part)
+    instructions_path.write_text(updated["custom_instructions"], encoding="utf-8")
     write_json(project / "work" / "source.custom-instructions.json", {"instructions": generated})
     write_json(project / "config" / "params.json", updated)
     return updated
@@ -1271,33 +1304,38 @@ def process_project(project: Path) -> None:
         work_dir = project / "work"
         stages = set(str(params.get("stages_to_run", "transcribe+translate+voiceover")).split("+"))
         use_subtitles_as_is = parse_legacy_bool(params.get("use_subtitles_as_is", False))
+        resume_from_improved = parse_legacy_bool(params.get("resume_from_improved", False))
 
         update_status(project, "running", "preprocess", 8, "Preparing source audio")
         source_mp3 = run_stage(project, manifest, "preprocess", lambda: ensure_mp3(source_media, work_dir, logger), logger)
 
-        subtitle_path = get_subtitle_path(project, params)
-        if subtitle_path:
-            update_status(project, "running", "subtitles", 20, "Loading subtitles")
-            segments = run_stage(project, manifest, "subtitles", lambda: parse_subtitles(subtitle_path, params, project, use_subtitles_as_is, logger), logger)
+        if resume_from_improved:
+            update_status(project, "running", "resume", 20, "Loading improved transcript")
+            segments = run_stage(project, manifest, "resume-improved", lambda: load_improved_segments(project, logger), logger)
         else:
-            update_status(project, "running", "transcribe", 20, "Transcribing source audio")
-            segments = run_stage(project, manifest, "transcribe", lambda: transcribe(source_mp3, params, project, logger), logger)
+            subtitle_path = get_subtitle_path(project, params)
+            if subtitle_path:
+                update_status(project, "running", "subtitles", 20, "Loading subtitles")
+                segments = run_stage(project, manifest, "subtitles", lambda: parse_subtitles(subtitle_path, params, project, use_subtitles_as_is, logger), logger)
+            else:
+                update_status(project, "running", "transcribe", 20, "Transcribing source audio")
+                segments = run_stage(project, manifest, "transcribe", lambda: transcribe(source_mp3, params, project, logger), logger)
 
-        if not use_subtitles_as_is and ("translate" in stages or "voiceover" in stages or "improve" in stages):
+        if not resume_from_improved and not use_subtitles_as_is and ("translate" in stages or "voiceover" in stages or "improve" in stages):
             update_status(project, "running", "translate", 45, "Translating transcript")
             segments = run_stage(
                 project,
                 manifest,
                 "translate",
-                lambda: translate_segments(segments, params.get("target_language") or params.get("language") or "RU", params, project, logger),
+                lambda: translate_segments(segments, params.get("target_language") or params.get("language") or "EN", params, project, logger),
                 logger,
             )
 
-        if not use_subtitles_as_is and parse_legacy_bool(params.get("autogenerate_custom_instructions", False)):
+        if not resume_from_improved and not use_subtitles_as_is and parse_legacy_bool(params.get("autogenerate_custom_instructions", False)):
             update_status(project, "running", "customize", 56, "Generating custom improvement instructions")
             params = run_stage(project, manifest, "customize", lambda: customize_instructions(segments, params, project, logger), logger)
 
-        if not use_subtitles_as_is and ("voiceover" in stages or "improve" in stages):
+        if not resume_from_improved and not use_subtitles_as_is and ("voiceover" in stages or "improve" in stages):
             update_status(project, "running", "improve", 62, "Preparing improved transcript")
             segments = run_stage(project, manifest, "improve", lambda: improve_segments(segments, params, project, logger), logger)
 
@@ -1351,6 +1389,15 @@ def process_project(project: Path) -> None:
                     "name": improved_artifact.name,
                     "path": "work/source.improved.json",
                     "bytes": improved_artifact.stat().st_size,
+                }
+            )
+        custom_instructions_artifact = project / "work" / "source.custom-instructions.txt"
+        if custom_instructions_artifact.exists():
+            manifest["artifacts"].append(
+                {
+                    "name": custom_instructions_artifact.name,
+                    "path": "work/source.custom-instructions.txt",
+                    "bytes": custom_instructions_artifact.stat().st_size,
                 }
             )
 

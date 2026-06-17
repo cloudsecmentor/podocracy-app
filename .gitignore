@@ -2,6 +2,7 @@
 .env.*
 !.env.example
 data/projects/
+prd/
 **/__pycache__/
 **/.pytest_cache/
 *.pyc

@@ -1,7 +1,6 @@
 services:
   web:
-    build:
-      context: ./apps/web
+    image: ${PODOCRACY_IMAGE_REGISTRY:-ghcr.io}/${PODOCRACY_IMAGE_NAMESPACE:-cloudsecmentor}/podocracy-web:${PODOCRACY_IMAGE_TAG:-latest}
     environment:
       PORTAL_ADMIN_PASSWORD: ${PORTAL_ADMIN_PASSWORD:-}
     ports:
@@ -11,8 +10,7 @@ services:
     restart: unless-stopped
 
   app-api:
-    build:
-      context: ./apps/app-api
+    image: ${PODOCRACY_IMAGE_REGISTRY:-ghcr.io}/${PODOCRACY_IMAGE_NAMESPACE:-cloudsecmentor}/podocracy-api:${PODOCRACY_IMAGE_TAG:-latest}
     env_file:
       - path: ${PODOCRACY_ENV_FILE:-.env}
         required: false
@@ -27,8 +25,7 @@ services:
     restart: unless-stopped
 
   worker:
-    build:
-      context: ./worker
+    image: ${PODOCRACY_IMAGE_REGISTRY:-ghcr.io}/${PODOCRACY_IMAGE_NAMESPACE:-cloudsecmentor}/podocracy-worker:${PODOCRACY_IMAGE_TAG:-latest}
     env_file:
       - path: ${PODOCRACY_ENV_FILE:-.env}
         required: false

@@ -19,6 +19,7 @@
       <section class="panel">
         <h2>New Project</h2>
         <form id="project-form">
+          <input type="hidden" name="translation_provider" value="openai">
           <label>
             Source media
             <input type="file" name="source" accept=".mp3,.mp4,.m4a,.wav,.url,audio/*,video/*">
@@ -29,11 +30,24 @@
             <input type="url" name="source_url" placeholder="https://...">
           </label>
 
+          <div class="inline-row">
+            <label>
+              BEMA episode
+              <input type="number" name="bema_episode" min="1" placeholder="34">
+            </label>
+            <button type="button" id="import-bema" class="secondary">Import BEMA</button>
+          </div>
+          <p class="muted">Downloads the episode MP3 and transcript into a new project.</p>
+
           <div class="grid">
             <label>
               Target language
               <select name="language">
-                <option value="RU" selected>Russian (RU)</option>
+                <option value="EN" selected>English (EN)</option>
+                <option value="RU">Russian (RU)</option>
+                <option value="UK">Ukrainian (UK)</option>
+                <option value="JA">Japanese (JA)</option>
+                <option value="ZH">Chinese (ZH)</option>
                 <option value="ES">Spanish (ES)</option>
                 <option value="FR">French (FR)</option>
                 <option value="DE">German (DE)</option>
@@ -48,15 +62,6 @@
                 <option value="verse">verse</option>
                 <option value="coral">coral</option>
                 <option value="sage">sage</option>
-              </select>
-            </label>
-
-            <label>
-              Stage preset
-              <select name="stage_preset">
-                <option value="voiceover" selected>Voiceover</option>
-                <option value="full">Full with improve</option>
-                <option value="translate-only">Translate only</option>
               </select>
             </label>
 
@@ -83,6 +88,24 @@
               <input type="number" name="max_char_chunk" min="50" max="20000" step="50" value="400">
               <span class="muted">Max chars per translated chunk</span>
             </label>
+          </div>
+
+          <div class="stage-picker">
+            <div class="stage-picker-header">
+              <strong>Stages</strong>
+              <div class="stage-picker-actions">
+                <button type="button" class="secondary" id="stages-select-all">Select all</button>
+                <button type="button" class="secondary" id="stages-deselect-all">Deselect all</button>
+              </div>
+            </div>
+            <div class="stage-picker-grid" id="stage-picker">
+              <label><input type="checkbox" name="stage" value="transcribe" checked> Transcribe</label>
+              <label><input type="checkbox" name="stage" value="translate" checked> Translate</label>
+              <label><input type="checkbox" name="stage" value="customize" checked> Customize</label>
+              <label><input type="checkbox" name="stage" value="improve" checked> Improve</label>
+              <label><input type="checkbox" name="stage" value="voiceover" checked> Voiceover</label>
+            </div>
+            <p class="muted">Select all or deselect all, then fine-tune the pipeline.</p>
           </div>
 
           <div class="grid">

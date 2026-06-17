@@ -1,0 +1,160 @@
+name: Release Images
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - release.yaml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  release:
+    name: Build and publish release images
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read release manifest
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="$(awk -F': *' '/^version:/ {print $2}' release.yaml | tr -d '"'\''[:space:]')"
+          latest="$(awk -F': *' '/^latest:/ {print tolower($2)}' release.yaml | tr -d '"'\''[:space:]')"
+
+          if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "release.yaml version must look like v0.1.0" >&2
+            exit 1
+          fi
+
+          if [[ "$latest" != "true" && "$latest" != "false" ]]; then
+            echo "release.yaml latest must be true or false" >&2
+            exit 1
+          fi
+
+          owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          namespace="${REGISTRY}/${owner}"
+
+          web_image="${namespace}/podocracy-web"
+          api_image="${namespace}/podocracy-api"
+          worker_image="${namespace}/podocracy-worker"
+
+          web_tags="${web_image}:${version}"
+          api_tags="${api_image}:${version}"
+          worker_tags="${worker_image}:${version}"
+          if [[ "$latest" == "true" ]]; then
+            web_tags="${web_tags}"$'\n'"${web_image}:latest"
+            api_tags="${api_tags}"$'\n'"${api_image}:latest"
+            worker_tags="${worker_tags}"$'\n'"${worker_image}:latest"
+          fi
+
+          {
+            echo "version=${version}"
+            echo "latest=${latest}"
+            echo "namespace=${namespace}"
+            echo "web_tags<<EOF"
+            echo "${web_tags}"
+            echo "EOF"
+            echo "api_tags<<EOF"
+            echo "${api_tags}"
+            echo "EOF"
+            echo "worker_tags<<EOF"
+            echo "${worker_tags}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create immutable Git tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${{ steps.release.outputs.version }}"
+          if git rev-parse -q --verify "refs/tags/${version}" >/dev/null; then
+            tag_sha="$(git rev-list -n 1 "${version}")"
+            head_sha="$(git rev-parse HEAD)"
+            if [[ "${tag_sha}" != "${head_sha}" ]]; then
+              echo "Tag ${version} already exists on ${tag_sha}; refusing to move it." >&2
+              exit 1
+            fi
+            echo "Tag ${version} already exists on this commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${version}" -m "${version}"
+          git push origin "${version}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push web image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./apps/web
+          push: true
+          tags: ${{ steps.release.outputs.web_tags }}
+
+      - name: Build and push API image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./apps/app-api
+          push: true
+          tags: ${{ steps.release.outputs.api_tags }}
+
+      - name: Build and push worker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./worker
+          push: true
+          tags: ${{ steps.release.outputs.worker_tags }}
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${{ steps.release.outputs.version }}"
+          namespace="${{ steps.release.outputs.namespace }}"
+
+          if gh release view "${version}" >/dev/null 2>&1; then
+            echo "GitHub release ${version} already exists."
+            exit 0
+          fi
+
+          notes="$(mktemp)"
+          {
+            echo "Container images:"
+            echo ""
+            echo "- ${namespace}/podocracy-web:${version}"
+            echo "- ${namespace}/podocracy-api:${version}"
+            echo "- ${namespace}/podocracy-worker:${version}"
+            if [[ "${{ steps.release.outputs.latest }}" == "true" ]]; then
+              echo ""
+              echo "The latest tags were also updated for this release."
+            fi
+          } > "${notes}"
+
+          gh release create "${version}" --title "${version}" --notes-file "${notes}"
