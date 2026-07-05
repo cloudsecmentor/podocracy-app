@@ -19,13 +19,15 @@ Updating `version` on `main` triggers `.github/workflows/release.yml`. The workf
 1. Validates that `version` looks like `v0.1.0`.
 2. Creates an annotated Git tag with that exact version if it does not exist.
 3. Refuses to move the tag if it already exists on another commit.
-4. Builds and pushes:
+4. Builds and pushes multi-arch images (`linux/amd64`, `linux/arm64`) under one tag per version:
 
 ```text
 ghcr.io/<owner>/podocracy-web:<version>
 ghcr.io/<owner>/podocracy-api:<version>
 ghcr.io/<owner>/podocracy-worker:<version>
 ```
+
+Apple Silicon (M1/M2/M3) and Intel/AMD Linux hosts use the same tag; Docker pulls the matching architecture automatically.
 
 5. Also pushes `latest` for each image when `latest: true`.
 6. Creates a GitHub Release for the version.

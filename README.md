@@ -7,7 +7,10 @@ Self-hosted Docker Compose portal for creating local voiceover translation proje
 Install Docker first:
 
 - macOS/Windows: [Docker Desktop](https://www.docker.com/products/docker-desktop/)
+- macOS with [Colima](https://github.com/abiosoft/colima): Docker Engine + Compose plugin (see below)
 - Linux: [Docker Engine](https://docs.docker.com/engine/install/)
+
+Prebuilt images support **linux/amd64** and **linux/arm64** (Apple Silicon) from **v0.2.1** onward. Use the same image tag on Intel and ARM Macs; Docker pulls the matching architecture.
 
 Create an app folder:
 
@@ -28,10 +31,10 @@ Download the prebuilt-image Compose file:
 curl -fsSLO https://raw.githubusercontent.com/cloudsecmentor/podocracy-app/main/docker-compose.images.yml
 ```
 
-Start the portal:
+Start the portal (with `.env` in this folder, `--env-file` is not required):
 
 ```bash
-docker compose --env-file .env -f docker-compose.images.yml up -d
+docker compose -f docker-compose.images.yml up -d
 ```
 
 Open `http://localhost:8080`.
@@ -39,8 +42,39 @@ Open `http://localhost:8080`.
 To update to a newer image later, run the same command again with `pull` first:
 
 ```bash
-docker compose --env-file .env -f docker-compose.images.yml pull
-docker compose --env-file .env -f docker-compose.images.yml up -d
+docker compose -f docker-compose.images.yml pull
+docker compose -f docker-compose.images.yml up -d
+```
+
+### Docker Compose CLI (Colima and older setups)
+
+Use whichever Compose command works on your machine. Both read the same `docker-compose.images.yml`.
+
+**Preferred:** Docker Compose v2 plugin:
+
+```bash
+docker compose -f docker-compose.images.yml up -d
+```
+
+If `docker compose` fails (for example `unknown flag: --env-file`), install the plugin:
+
+```bash
+brew install docker-compose
+docker compose version
+```
+
+**Fallback:** standalone `docker-compose` (common on Colima installs):
+
+```bash
+docker-compose -f docker-compose.images.yml up -d
+```
+
+Provider keys are loaded from `.env` by the API and worker services automatically. Keep `.env` next to the compose file, or set `PODOCRACY_ENV_FILE` to an absolute path. Use `--env-file .env` only when you need Compose itself to read variables from a file in a different location (for example `PODOCRACY_IMAGE_TAG`).
+
+On Colima, start the Docker daemon before pulling images:
+
+```bash
+colima start
 ```
 
 Project files stay in `./projects` by default. Set `PODOCRACY_PROJECTS_DIR` in `.env` only if you want a different storage path.
@@ -62,7 +96,7 @@ The stack writes projects, logs, and artifacts under `PODOCRACY_PROJECTS_DIR`. I
 ```bash
 export PODOCRACY_ENV_FILE=/absolute/path/to/provider.env
 export PODOCRACY_PROJECTS_DIR="$HOME/podocracy-projects"
-export PODOCRACY_IMAGE_TAG=v0.1.0
+export PODOCRACY_IMAGE_TAG=v0.2.1
 
 docker compose -f docker-compose.images.yml pull
 docker compose -f docker-compose.images.yml up -d

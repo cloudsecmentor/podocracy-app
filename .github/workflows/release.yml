@@ -98,6 +98,9 @@ jobs:
           git tag -a "${version}" -m "${version}"
           git push origin "${version}"
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -113,6 +116,7 @@ jobs:
         with:
           context: ./apps/web
           push: true
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.release.outputs.web_tags }}
 
       - name: Build and push API image
@@ -120,6 +124,7 @@ jobs:
         with:
           context: ./apps/app-api
           push: true
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.release.outputs.api_tags }}
 
       - name: Build and push worker image
@@ -127,6 +132,7 @@ jobs:
         with:
           context: ./worker
           push: true
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.release.outputs.worker_tags }}
 
       - name: Create GitHub release
@@ -151,6 +157,8 @@ jobs:
             echo "- ${namespace}/podocracy-web:${version}"
             echo "- ${namespace}/podocracy-api:${version}"
             echo "- ${namespace}/podocracy-worker:${version}"
+            echo ""
+            echo "Platforms: linux/amd64, linux/arm64"
             if [[ "${{ steps.release.outputs.latest }}" == "true" ]]; then
               echo ""
               echo "The latest tags were also updated for this release."
