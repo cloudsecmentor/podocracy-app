@@ -14,7 +14,13 @@ export PODOCRACY_PROJECTS_DIR="$HOME/podocracy-projects"
 docker compose up --build
 ```
 
-4. Open `http://localhost:8080`.
+4. Open `http://localhost:8080`, or run `./scripts/launch.sh` to start the stack and open the browser automatically.
+
+From a source checkout, `./scripts/start-local.sh` builds local images and opens the portal. Use `./scripts/launch.sh` when you want the prebuilt-image compose file without rebuilding.
+
+### Install as a desktop app (PWA)
+
+With the portal running, use your browser’s install/add-to-dock option to pin Podocracy as a standalone app window.
 
 Generated files live under `PODOCRACY_PROJECTS_DIR`. If unset, they fall back to `data/projects/` inside the repo. Do not commit generated project data. Use an absolute path to keep projects across repo checkout changes and release downloads.
 
