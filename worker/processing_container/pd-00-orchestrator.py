@@ -97,6 +97,12 @@ for path in sys.path:
 
 from common.shared_functions_common import is_supported_file_type
 from shared_functions import *
+from portal_status import (
+    append_portal_stage,
+    fatal_stage_failures,
+    now_iso as portal_now_iso,
+    update_portal_status,
+)
 
 
 def collect_logs(path):
@@ -251,6 +257,7 @@ def main(path, time2sleep=0):
     ]
 
     stages = params["stages_to_run"]
+    stages_to_run_param = stages
     custom_subtitles = params.get("custom_subtitles", "false") == "true"
 
     stages, scripts = add_pre_post_processing(
@@ -273,22 +280,40 @@ def main(path, time2sleep=0):
             stages_set.update({"improve", "translate"})
     logging.info(f"Stages to execute: {stages_list}")
 
-    # Running each script with its arguments
-    total_stages = len(scripts)
+    runnable_scripts = [
+        (stage, script, args)
+        for stage, script, args in scripts
+        if stage in stages_set or stages == "all"
+    ]
+    total_runnable = max(len(runnable_scripts), 1)
     stage_failures: list[str] = []
+    runnable_index = 0
 
-    for current_stage_count, (stage, script, args) in enumerate(scripts):
+    update_portal_status(
+        path,
+        state="running",
+        stage="starting",
+        progress=2,
+        message="Worker started",
+    )
+
+    for stage, script, args in scripts:
         if stage not in stages_set and stages != "all":
             logging.info(f"Skipping stage [{stage}]: {script} with args: {args}")
             continue
-        
-        # Calculate progress as the ratio of current stage count to total stages
-        progress = int((current_stage_count / total_stages) * 100)
-        
-        # Local worker uses status.json; skip remote API status updates when API_URI is unset.
-        # update_status(user_id=user_id, project_id=base_name, state=stage, progress=progress)
+
+        runnable_index += 1
+        progress = min(97, int((runnable_index / total_runnable) * 95) + 2)
+        update_portal_status(
+            path,
+            state="running",
+            stage=stage,
+            progress=progress,
+            message=f"Running {stage}",
+        )
 
         logging.info(f"Running stage [{stage}]: {script} with args: {args}, timestamp: [{get_timestamp()}]")
+        stage_started_at = portal_now_iso()
         try:
             log_dir = f"{get_local_processing_directory()}/.log"
             os.makedirs(log_dir, exist_ok=True)
@@ -307,23 +332,69 @@ def main(path, time2sleep=0):
             if result.returncode != 0:
                 stage_failures.append(stage)
                 tail = (result.stdout or "")[-2000:]
+                append_portal_stage(
+                    path,
+                    stage,
+                    "failed",
+                    stage_started_at,
+                    portal_now_iso(),
+                    f"exit code {result.returncode}",
+                )
                 logging.error(
                     f"Stage [{stage}] failed with return code {result.returncode}. "
                     f"Log: {stage_log_path}\n{tail}"
                 )
             else:
+                append_portal_stage(
+                    path,
+                    stage,
+                    "completed",
+                    stage_started_at,
+                    portal_now_iso(),
+                )
                 logging.info(f"Stage [{stage}] completed successfully. Log: {stage_log_path}")
 
         except Exception as e:
             stage_failures.append(stage)
+            append_portal_stage(
+                path,
+                stage,
+                "failed",
+                stage_started_at,
+                portal_now_iso(),
+                str(e),
+            )
             logging.error(f"Failed to run stage [{stage}]: {script} with args: {args}, error: {e}")
 
+    fatal_failures = fatal_stage_failures(stage_failures, stages_to_run_param)
     if stage_failures:
         logging.error(f"Pipeline failed stages: {stage_failures}")
         collect_logs_and_data(path)
+
+    if fatal_failures:
+        update_portal_status(
+            path,
+            state="failed",
+            stage=fatal_failures[-1],
+            progress=100,
+            message="Project failed",
+            error=f"Failed stages: {', '.join(fatal_failures)}",
+        )
         sys.exit(1)
 
-    # update_status(user_id=user_id, project_id=base_name, state="completed", progress=100)
+    warning_stages = [stage for stage in stage_failures if stage not in fatal_failures]
+    completion_message = "Project completed"
+    if warning_stages:
+        completion_message = f"Project completed with warnings: {', '.join(warning_stages)}"
+        logging.warning(completion_message)
+
+    update_portal_status(
+        path,
+        state="completed",
+        stage="completed",
+        progress=100,
+        message=completion_message,
+    )
 
     # ## slip a few  minutes
     logging.info(f"Slipping {time2sleep} minutes post processing")

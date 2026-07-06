@@ -13,7 +13,7 @@ PROJECTS_DIR = Path(os.getenv("PROJECTS_DIR", "/data/projects"))
 POLL_SECONDS = float(os.getenv("WORKER_POLL_SECONDS", "3"))
 WORKER_ROOT = Path(__file__).resolve().parent
 PROCESSING_DIR = WORKER_ROOT / "processing_container"
-LEGACY_PROCESSING_DIR = WORKER_ROOT / "backend" / "processing_container"
+ORCHESTRATOR_LAYOUT_DIR = WORKER_ROOT / "backend" / "processing_container"
 
 
 def now_iso() -> str:
@@ -47,16 +47,16 @@ def update_status(project: Path, state: str, stage: str, progress: int, message:
     write_json(project / "status.json", status)
 
 
-def ensure_legacy_layout() -> None:
-    LEGACY_PROCESSING_DIR.parent.mkdir(parents=True, exist_ok=True)
-    if LEGACY_PROCESSING_DIR.exists():
+def ensure_orchestrator_layout() -> None:
+    ORCHESTRATOR_LAYOUT_DIR.parent.mkdir(parents=True, exist_ok=True)
+    if ORCHESTRATOR_LAYOUT_DIR.exists():
         return
     try:
-        LEGACY_PROCESSING_DIR.symlink_to(PROCESSING_DIR, target_is_directory=True)
+        ORCHESTRATOR_LAYOUT_DIR.symlink_to(PROCESSING_DIR, target_is_directory=True)
     except OSError:
         import shutil
 
-        shutil.copytree(PROCESSING_DIR, LEGACY_PROCESSING_DIR)
+        shutil.copytree(PROCESSING_DIR, ORCHESTRATOR_LAYOUT_DIR)
 
 
 def project_source_path(project: Path) -> Path:
@@ -77,11 +77,11 @@ def project_source_path(project: Path) -> Path:
 
 
 def process_project(project: Path) -> None:
-    ensure_legacy_layout()
+    ensure_orchestrator_layout()
     source_path = project_source_path(project)
     params_path = source_path.with_suffix(".params.json")
     if not params_path.exists():
-        raise FileNotFoundError(f"Legacy params file is missing: {params_path}")
+        raise FileNotFoundError(f"Params file is missing: {params_path}")
 
     logs_dir = project / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
@@ -89,8 +89,9 @@ def process_project(project: Path) -> None:
     command = [sys.executable, str(PROCESSING_DIR / "pd-00-orchestrator.py"), "-p", str(source_path)]
     env = os.environ.copy()
     env["PYTHONPATH"] = f"{WORKER_ROOT}{os.pathsep}{PROCESSING_DIR}{os.pathsep}{env.get('PYTHONPATH', '')}"
+    env["PODOCRACY_PROJECT_DIR"] = str(project)
 
-    update_status(project, "running", "legacy-worker", 1, "Legacy worker started")
+    update_status(project, "running", "starting", 1, "Worker started")
     with log_path.open("a", encoding="utf-8") as log:
         log.write(f"\n[{now_iso()}] Running {' '.join(command)}\n")
         log.flush()
@@ -103,18 +104,22 @@ def process_project(project: Path) -> None:
             text=True,
         )
 
+    status = read_json(project / "status.json", {})
+    if status.get("state") in {"completed", "failed"}:
+        return
+
     if result.returncode != 0:
         update_status(
             project,
             "failed",
-            "legacy-worker",
+            status.get("stage") or "failed",
             100,
-            "Legacy worker failed",
+            "Worker failed",
             error=f"orchestrator exited with {result.returncode}",
         )
         return
 
-    update_status(project, "completed", "completed", 100, "Legacy worker completed")
+    update_status(project, "completed", "completed", 100, "Project completed")
 
 
 def acquire_lock(project: Path) -> int | None:
@@ -145,7 +150,7 @@ def next_queued_project() -> Path | None:
 
 
 def main() -> None:
-    ensure_legacy_layout()
+    ensure_orchestrator_layout()
     print(f"Worker polling {PROJECTS_DIR}", flush=True)
     while True:
         project = next_queued_project()
@@ -162,7 +167,7 @@ def main() -> None:
             try:
                 process_project(project)
             except Exception as exc:
-                update_status(project, "failed", "legacy-worker", 100, "Legacy worker failed", error=str(exc))
+                update_status(project, "failed", "failed", 100, "Worker failed", error=str(exc))
                 raise
         finally:
             release_lock(project, fd)
