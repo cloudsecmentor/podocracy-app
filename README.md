@@ -10,7 +10,7 @@ Install Docker first:
 - macOS with [Colima](https://github.com/abiosoft/colima): Docker Engine + Compose plugin (see below)
 - Linux: [Docker Engine](https://docs.docker.com/engine/install/)
 
-Prebuilt images support **linux/amd64** and **linux/arm64** (Apple Silicon) from **v0.2.1** onward. Use the same image tag on Intel and ARM Macs; Docker pulls the matching architecture.
+Prebuilt images support **linux/amd64** and **linux/arm64** (Apple Silicon) from **v0.2.1** onward.
 
 Create an app folder:
 
@@ -19,11 +19,12 @@ mkdir -p "$HOME/podocracy-worker-portal/projects"
 cd "$HOME/podocracy-worker-portal"
 ```
 
-Create `.env` in that folder:
+Create your `.env` by copying [.env.example](.env.example), then fill in at least:
 
-```env
-OPENAI_API_KEY=replace-with-your-openai-key
-```
+- `OPENAI_API_KEY` (required)
+- `PORTAL_ADMIN_PASSWORD` (strongly recommended whenever the portal is reachable from other machines)
+
+`.env.example` is the source of truth for supported provider keys (OpenAI, DeepL, ElevenLabs) and common runtime options.
 
 Download the prebuilt-image Compose file:
 
@@ -31,13 +32,15 @@ Download the prebuilt-image Compose file:
 curl -fsSLO https://raw.githubusercontent.com/cloudsecmentor/podocracy-app/main/docker-compose.images.yml
 ```
 
-Start the portal (with `.env` in this folder, `--env-file` is not required):
+Start the portal:
 
 ```bash
 docker compose -f docker-compose.images.yml up -d
 ```
 
 Open `http://localhost:8080`.
+
+First startup can take a while: Docker may pull large images, and the worker may spend extra time caching Whisper artifacts before the first job completes.
 
 ### One-click launch
 
@@ -46,8 +49,9 @@ From the app folder (where your compose file and `.env` live), you can start the
 **macOS / Linux:**
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/cloudsecmentor/podocracy-app/main/scripts/launch.sh
-curl -fsSLO https://raw.githubusercontent.com/cloudsecmentor/podocracy-app/main/scripts/_launch-common.sh
+RAW_BASE="https://raw.githubusercontent.com/cloudsecmentor/podocracy-app/main"
+curl -fsSLO "$RAW_BASE/scripts/launch.sh"
+curl -fsSLO "$RAW_BASE/scripts/_launch-common.sh"
 chmod +x launch.sh
 ./launch.sh
 ```
@@ -57,62 +61,95 @@ Download both files into the same folder as your `docker-compose.images.yml` and
 **Windows:**
 
 ```bat
-curl -fsSLO https://raw.githubusercontent.com/cloudsecmentor/podocracy-app/main/scripts/launch.bat
+set "RAW_BASE=https://raw.githubusercontent.com/cloudsecmentor/podocracy-app/main"
+curl -fsSLO "%RAW_BASE%/scripts/launch.bat"
 launch.bat
 ```
 
 The launcher checks that Docker is running, starts the stack, waits for `/api/health`, then opens `http://localhost:8080`.
 
-Optional environment variables:
+Launcher-specific environment variables:
 
-- `PODOCRACY_LAUNCH_MODE=source` — build from local source (`docker-compose.yml`) instead of prebuilt images
-- `PODOCRACY_PULL_IMAGES=1` — pull newer images before starting
-- `PODOCRACY_NO_BROWSER=1` — start containers without opening a browser tab
-- `PORTAL_HTTP_PORT` — change the local port (default `8080`)
+- `PODOCRACY_LAUNCH_MODE=auto|images|source` (default `auto`)
+- `PODOCRACY_PULL_IMAGES=1` pull newer images before starting
+- `PODOCRACY_NO_BROWSER=1` start containers without opening a browser tab
+- `PODOCRACY_LAUNCH_TIMEOUT=90` readiness timeout in seconds
+- `PODOCRACY_COMPOSE_IMAGES_FILE=docker-compose.images.yml`
+- `PODOCRACY_COMPOSE_SOURCE_FILE=docker-compose.yml`
+- `PORTAL_HTTP_PORT=8080` local HTTP port
 
 ### Install as a desktop app (PWA)
 
-After the portal is running, open it in Chrome, Edge, or Safari and use the browser’s **Install app** option (or **Add to Dock** on macOS). Podocracy opens in its own window with the same UI, while Docker continues to run the backend.
+After the portal is running, open it in Chrome, Edge, or Safari and use the browser's **Install app** option (or **Add to Dock** on macOS).
 
-To update to a newer image later, run the same command again with `pull` first:
+### Update / Stop / Restart
+
+Update to a newer image:
 
 ```bash
 docker compose -f docker-compose.images.yml pull
 docker compose -f docker-compose.images.yml up -d
 ```
 
+Stop:
+
+```bash
+docker compose -f docker-compose.images.yml down
+```
+
+If you cloned this repo and run from source, you can also use:
+
+- `./scripts/stop-local.sh`
+- `./scripts/restart-local.sh`
+
 ### Docker Compose CLI (Colima and older setups)
 
 Use whichever Compose command works on your machine. Both read the same `docker-compose.images.yml`.
 
-**Preferred:** Docker Compose v2 plugin:
+Preferred:
 
 ```bash
 docker compose -f docker-compose.images.yml up -d
 ```
 
-If `docker compose` fails (for example `unknown flag: --env-file`), install the plugin:
-
-```bash
-brew install docker-compose
-docker compose version
-```
-
-**Fallback:** standalone `docker-compose` (common on Colima installs):
+Fallback:
 
 ```bash
 docker-compose -f docker-compose.images.yml up -d
 ```
 
-Provider keys are loaded from `.env` by the API and worker services automatically. Keep `.env` next to the compose file, or set `PODOCRACY_ENV_FILE` to an absolute path. Use `--env-file .env` only when you need Compose itself to read variables from a file in a different location (for example `PODOCRACY_IMAGE_TAG`).
-
-On Colima, start the Docker daemon before pulling images:
+On Colima, start the daemon first:
 
 ```bash
 colima start
 ```
 
-Project files stay in `./projects` by default. Set `PODOCRACY_PROJECTS_DIR` in `.env` only if you want a different storage path.
+## Environment Variables Reference
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `OPENAI_API_KEY` | empty | Required for OpenAI-backed transcription/TTS/translation paths. |
+| `DEEPL_AUTH_KEY` | empty | Enables DeepL translation provider. |
+| `ELEVENLABS_API_KEY` | empty | Enables ElevenLabs TTS provider. |
+| `PORTAL_ADMIN_PASSWORD` | empty | Optional HTTP basic auth password for the web portal; set this for any non-local exposure. |
+| `PORTAL_HTTP_PORT` | `8080` | Host port mapped to the portal web container. |
+| `PODOCRACY_ENV_FILE` | `.env` | Env file loaded by API and worker containers. |
+| `PODOCRACY_PROJECTS_DIR` | images: `./projects`; source: `./data/projects` | Host path for project files, logs, and artifacts. |
+| `WORKER_POLL_SECONDS` | `3` | Worker queue polling interval. |
+| `PODOCRACY_IMAGE_REGISTRY` | `ghcr.io` | Image registry for prebuilt stacks. |
+| `PODOCRACY_IMAGE_NAMESPACE` | `cloudsecmentor` | Image namespace/owner for prebuilt stacks. |
+| `PODOCRACY_IMAGE_TAG` | `latest` | Image tag for prebuilt stacks. |
+| `PODOCRACY_LAUNCH_MODE` | `auto` | Launcher mode selection (`auto`, `images`, `source`). |
+| `PODOCRACY_PULL_IMAGES` | `0` | If `1`, launcher runs `docker compose pull` before `up -d`. |
+| `PODOCRACY_NO_BROWSER` | `0` | If `1`, launcher does not open the browser automatically. |
+| `PODOCRACY_LAUNCH_TIMEOUT` | `90` | Launcher health-check timeout in seconds. |
+| `PODOCRACY_COMPOSE_IMAGES_FILE` | `docker-compose.images.yml` | Images compose file path for launchers. |
+| `PODOCRACY_COMPOSE_SOURCE_FILE` | `docker-compose.yml` | Source compose file path for launchers. |
+
+Env file rule:
+
+- If `.env` is next to your compose file, Compose loads it automatically.
+- Use `--env-file` only when your env file lives elsewhere.
 
 ## Local Source Run
 
@@ -123,8 +160,6 @@ export PODOCRACY_PROJECTS_DIR="$HOME/podocracy-projects"
 ```
 
 Open `http://localhost:8080`.
-
-The stack writes projects, logs, and artifacts under `PODOCRACY_PROJECTS_DIR`. If unset, it falls back to `data/projects/` inside the repo. Provider keys are read from the env file and are not written to project folders.
 
 ## Prebuilt Images From Repo Checkout
 
@@ -139,6 +174,14 @@ docker compose -f docker-compose.images.yml up -d
 
 See [docs/releases.md](docs/releases.md) for release tagging and image publishing.
 
+## Troubleshooting
+
+- **Port 8080 already in use:** set `PORTAL_HTTP_PORT` (for example `PORTAL_HTTP_PORT=8081`) and restart.
+- **Launcher times out waiting for health:** increase `PODOCRACY_LAUNCH_TIMEOUT` and check logs.
+- **Where to see logs:**
+  - Stack logs: `docker compose -f docker-compose.images.yml logs`
+  - Project logs: per-project `logs/` under `PODOCRACY_PROJECTS_DIR`
+
 ## Test Upload
 
 Use the web UI, or call the API through the web proxy:
@@ -150,16 +193,10 @@ curl -F "source=@/path/to/file.mp3" \
   http://localhost:8080/api/projects
 ```
 
-The worker processes one queued project at a time. Final files appear in the project's `output/` folder and in the UI artifact list.
-
 ## Remote Ubuntu
 
-See [docs/remote-ubuntu-setup.md](docs/remote-ubuntu-setup.md).
+See [docs/remote-ubuntu-setup.md](docs/remote-ubuntu-setup.md) and keep `PORTAL_ADMIN_PASSWORD` set when exposing the portal remotely.
 
 ## License
 
-Licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE).
-
-Free for any **noncommercial** purpose — personal, hobby, research, education, and noncommercial organizations. **Commercial use** (including running it as a paid service for others) is **not** permitted without a separate license.
-
-This is a source-available, non-OSI license, and it covers only this project's own code. Third-party dependencies (e.g. ffmpeg, Python packages in `worker/requirements.txt`, and any external APIs such as OpenAI/Whisper) remain under their own terms.
+Licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE) (noncommercial use only).
