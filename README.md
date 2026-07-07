@@ -39,6 +39,41 @@ docker compose -f docker-compose.images.yml up -d
 
 Open `http://localhost:8080`.
 
+### One-click launch
+
+From the app folder (where your compose file and `.env` live), you can start the portal and open your browser in one step:
+
+**macOS / Linux:**
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/cloudsecmentor/podocracy-app/main/scripts/launch.sh
+curl -fsSLO https://raw.githubusercontent.com/cloudsecmentor/podocracy-app/main/scripts/_launch-common.sh
+chmod +x launch.sh
+./launch.sh
+```
+
+Download both files into the same folder as your `docker-compose.images.yml` and `.env`. If you cloned this repo, run `./scripts/launch.sh` instead.
+
+**Windows:**
+
+```bat
+curl -fsSLO https://raw.githubusercontent.com/cloudsecmentor/podocracy-app/main/scripts/launch.bat
+launch.bat
+```
+
+The launcher checks that Docker is running, starts the stack, waits for `/api/health`, then opens `http://localhost:8080`.
+
+Optional environment variables:
+
+- `PODOCRACY_LAUNCH_MODE=source` — build from local source (`docker-compose.yml`) instead of prebuilt images
+- `PODOCRACY_PULL_IMAGES=1` — pull newer images before starting
+- `PODOCRACY_NO_BROWSER=1` — start containers without opening a browser tab
+- `PORTAL_HTTP_PORT` — change the local port (default `8080`)
+
+### Install as a desktop app (PWA)
+
+After the portal is running, open it in Chrome, Edge, or Safari and use the browser’s **Install app** option (or **Add to Dock** on macOS). Podocracy opens in its own window with the same UI, while Docker continues to run the backend.
+
 To update to a newer image later, run the same command again with `pull` first:
 
 ```bash
