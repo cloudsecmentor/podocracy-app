@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Keep launch mode/file selection in sync with scripts/launch.bat.
 
 if [[ -f "$SCRIPT_DIR/_launch-common.sh" ]]; then
   # shellcheck source=scripts/_launch-common.sh

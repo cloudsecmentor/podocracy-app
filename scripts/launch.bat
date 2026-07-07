@@ -1,7 +1,14 @@
 @echo off
 setlocal EnableExtensions
 
-set "ROOT_DIR=%~dp0.."
+set "SCRIPT_DIR=%~dp0"
+if exist "%SCRIPT_DIR%docker-compose.images.yml" (
+  set "ROOT_DIR=%SCRIPT_DIR%"
+) else if exist "%SCRIPT_DIR%docker-compose.yml" (
+  set "ROOT_DIR=%SCRIPT_DIR%"
+) else (
+  set "ROOT_DIR=%SCRIPT_DIR%.."
+)
 pushd "%ROOT_DIR%" >nul || (
   echo Could not change to repository directory.>&2
   exit /b 1
@@ -23,12 +30,25 @@ if errorlevel 1 (
   exit /b 1
 )
 
-if /I "%PODOCRACY_LAUNCH_MODE%"=="source" (
-  set "COMPOSE_FILE=docker-compose.yml"
-) else if exist "docker-compose.images.yml" (
-  set "COMPOSE_FILE=docker-compose.images.yml"
+if not defined PODOCRACY_COMPOSE_IMAGES_FILE set "PODOCRACY_COMPOSE_IMAGES_FILE=docker-compose.images.yml"
+if not defined PODOCRACY_COMPOSE_SOURCE_FILE set "PODOCRACY_COMPOSE_SOURCE_FILE=docker-compose.yml"
+if not defined PODOCRACY_LAUNCH_MODE set "PODOCRACY_LAUNCH_MODE=auto"
+
+rem Keep mode/file selection in sync with scripts/_launch-common.sh.
+if /I "%PODOCRACY_LAUNCH_MODE%"=="images" (
+  set "COMPOSE_FILE=%PODOCRACY_COMPOSE_IMAGES_FILE%"
+) else if /I "%PODOCRACY_LAUNCH_MODE%"=="source" (
+  set "COMPOSE_FILE=%PODOCRACY_COMPOSE_SOURCE_FILE%"
+) else if /I "%PODOCRACY_LAUNCH_MODE%"=="auto" (
+  if exist "%PODOCRACY_COMPOSE_IMAGES_FILE%" (
+    set "COMPOSE_FILE=%PODOCRACY_COMPOSE_IMAGES_FILE%"
+  ) else (
+    set "COMPOSE_FILE=%PODOCRACY_COMPOSE_SOURCE_FILE%"
+  )
 ) else (
-  set "COMPOSE_FILE=docker-compose.yml"
+  echo Unknown PODOCRACY_LAUNCH_MODE: %PODOCRACY_LAUNCH_MODE% ^(use auto, images, or source^).>&2
+  popd >nul
+  exit /b 1
 )
 
 if not exist "%COMPOSE_FILE%" (
