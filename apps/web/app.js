@@ -7,12 +7,17 @@ let improvedDirty = false;
 let improvedLoading = false;
 let currentDetailSig = null;
 let actionMessage = { text: "", kind: "" };
+let draftProjectId = null;
 
 const providerStatus = document.querySelector("#provider-status");
 const projectsEl = document.querySelector("#projects");
 const detailEl = document.querySelector("#detail");
 const form = document.querySelector("#project-form");
 const formMessage = document.querySelector("#form-message");
+const formTitle = document.querySelector("#project-form-title");
+const sourceFields = document.querySelector("#source-fields");
+const submitProjectButton = document.querySelector("#submit-project");
+const cancelDraftButton = document.querySelector("#cancel-draft");
 const bemaImportButton = document.querySelector("#import-bema");
 const stageSelectAllButton = document.querySelector("#stages-select-all");
 const stageDeselectAllButton = document.querySelector("#stages-deselect-all");
@@ -92,6 +97,31 @@ function setAllStages(checked) {
   stageCheckboxes.forEach((checkbox) => {
     checkbox.checked = checked;
   });
+}
+
+function setDraftMode(project, scrollToForm = false) {
+  draftProjectId = project.id;
+  const episode = project.metadata?.bema_episode;
+  formTitle.textContent = episode ? `Configure BEMA episode ${episode}` : "Configure imported project";
+  sourceFields.querySelectorAll("input").forEach((input) => {
+    input.disabled = true;
+  });
+  submitProjectButton.textContent = "Start processing";
+  cancelDraftButton.hidden = false;
+  setFormMessage("Audio and transcript imported. Set the options below, then start processing.", "ok");
+  if (scrollToForm) {
+    formTitle.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+}
+
+function clearDraftMode() {
+  draftProjectId = null;
+  formTitle.textContent = "New project";
+  sourceFields.querySelectorAll("input").forEach((input) => {
+    input.disabled = false;
+  });
+  submitProjectButton.textContent = "Create project";
+  cancelDraftButton.hidden = true;
 }
 
 function renderProviders(providers) {
@@ -182,6 +212,7 @@ function pipelineSteps(stages, status) {
 function detailSignature(project, hasImproved, improvedFilename, stages, artifacts) {
   return [
     project.id,
+    project.status?.state || "",
     hasImproved ? "1" : "0",
     improvedFilename || "",
     stages.map((item) => item.name).join(","),
@@ -247,6 +278,11 @@ async function renderDetail(project) {
       <p class="muted" id="d-statusmsg">${escapeHtml(status.message || "")}</p>
       <div class="progress"><div id="d-progress" style="width:${progress}%"></div></div>
       <p class="message ${actionMessage.kind}" id="d-action-msg">${escapeHtml(actionMessage.text)}</p>
+      ${status.state === "draft" ? `
+        <div class="editor-actions">
+          <button type="button" id="configure-draft">Configure and start</button>
+        </div>
+      ` : ""}
       <div class="stage-summary">
         <h3>Stage history</h3>
         <ul class="stage-list" id="d-stages">
@@ -302,6 +338,12 @@ async function renderDetail(project) {
     if (voiceoverButton) {
       voiceoverButton.addEventListener("click", () => {
         void startVoiceoverFromImproved(project.id);
+      });
+    }
+    const configureDraftButton = detailEl.querySelector("#configure-draft");
+    if (configureDraftButton) {
+      configureDraftButton.addEventListener("click", () => {
+        setDraftMode(project, true);
       });
     }
 
@@ -415,7 +457,7 @@ async function importBemaEpisode() {
     selectedProject = project.id;
     currentDetailSig = null;
     episodeInput.value = "";
-    setFormMessage(`Imported BEMA episode ${Math.floor(episode)}.`, "ok");
+    setDraftMode(project);
     await loadProjects();
   } catch (error) {
     setFormMessage(error.message, "error");
@@ -445,7 +487,7 @@ form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const sourceFile = form.querySelector("input[name=source]").files[0];
   const sourceUrl = form.querySelector("input[name=source_url]").value.trim();
-  if (!sourceFile && !sourceUrl) {
+  if (!draftProjectId && !sourceFile && !sourceUrl) {
     setFormMessage("Upload a source file or paste a link first.", "error");
     return;
   }
@@ -454,22 +496,25 @@ form.addEventListener("submit", async (event) => {
   if (stagesToRun) {
     formData.set("stages_to_run", stagesToRun);
   }
-  const submit = form.querySelector("button[type=submit]");
+  const submit = submitProjectButton;
   submit.disabled = true;
-  submit.textContent = "Creating...";
+  submit.textContent = draftProjectId ? "Starting..." : "Creating...";
   setFormMessage("");
   try {
-    const project = await api("/api/projects", { method: "POST", body: formData });
+    const endpoint = draftProjectId ? `/api/projects/${draftProjectId}/start` : "/api/projects";
+    const project = await api(endpoint, { method: "POST", body: formData });
     selectedProject = project.id;
     currentDetailSig = null;
     form.reset();
-    setFormMessage("Project created and queued.", "ok");
+    const startedDraft = Boolean(draftProjectId);
+    clearDraftMode();
+    setFormMessage(startedDraft ? "Imported project configured and queued." : "Project created and queued.", "ok");
     await loadProjects();
   } catch (error) {
     setFormMessage(error.message, "error");
   } finally {
     submit.disabled = false;
-    submit.textContent = "Create project";
+    submit.textContent = draftProjectId ? "Start processing" : "Create project";
   }
 });
 
@@ -478,6 +523,10 @@ stageSelectAllButton.addEventListener("click", () => setAllStages(true));
 stageDeselectAllButton.addEventListener("click", () => setAllStages(false));
 bemaImportButton.addEventListener("click", () => {
   void importBemaEpisode();
+});
+cancelDraftButton.addEventListener("click", () => {
+  clearDraftMode();
+  setFormMessage("");
 });
 
 loadProjects();
