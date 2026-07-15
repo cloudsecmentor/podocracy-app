@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from html import unescape
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -285,7 +286,7 @@ def download_bema_episode(episode: int) -> tuple[str, bytes, str]:
         flags=re.IGNORECASE,
     )
     if transcript_link_match:
-        transcript_url = transcript_link_match.group(1)
+        transcript_url = urljoin(bema_url, unescape(transcript_link_match.group(1)))
         try:
             transcript_response = requests.get(transcript_url, headers=bema_headers(), timeout=30)
             transcript_response.raise_for_status()
@@ -403,6 +404,83 @@ def build_project_payload(
     return params, metadata
 
 
+def build_configured_project_payload(
+    *,
+    filename: str,
+    language: str,
+    voice: str,
+    stage_preset: str,
+    stages_to_run: str,
+    custom_instructions: str,
+    tts_api: str,
+    translation_provider: str,
+    elevenlabs_voice_id: str,
+    voiceover_tempo: str,
+    voiceover_shift: str,
+    normalize_final_audio: str,
+    max_preview_size_mb: str,
+    use_subtitles_as_is: str,
+    autogenerate_custom_instructions: str,
+    detailed_transcription: str,
+    whisper_chunk_length_sec: str,
+    whisper_silence_split: str,
+    whisper_silence_sec: str,
+    max_char_chunk_per_sentence: str,
+    max_char_chunk: str,
+    improve_max_chunk_chars: str,
+    subtitle_relative: str = "",
+    custom_recordings_relative: str = "",
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    providers_present = provider_status()
+    if not providers_present["openai"]:
+        raise HTTPException(status_code=400, detail="OPENAI_API_KEY is required")
+
+    parsed_language = parse_target_language(language)
+    parsed_translation_provider = parse_translation_provider(translation_provider)
+    if parsed_translation_provider == "deepl" and not providers_present["deepl"]:
+        raise HTTPException(status_code=400, detail="DEEPL_AUTH_KEY is required for DeepL translation")
+    resolved_stages_to_run = normalize_stage_list(stages_to_run, stage_preset)
+    parsed_tts_api = parse_tts_api(tts_api)
+    if "voiceover" in resolved_stages_to_run and parsed_tts_api == "elevenlabs" and not providers_present["elevenlabs"]:
+        raise HTTPException(status_code=400, detail="ELEVENLABS_API_KEY is required for ElevenLabs TTS")
+
+    parsed_voiceover_tempo = parse_optional_float(voiceover_tempo, "voiceover_tempo", 0.5, 2.0)
+    parsed_voiceover_shift = parse_optional_float(voiceover_shift, "voiceover_shift", -300.0, 300.0)
+    parsed_max_preview_size_mb = parse_optional_float(max_preview_size_mb, "max_preview_size_mb", 0.1, 500.0)
+    parsed_whisper_chunk_length_sec = parse_optional_float(whisper_chunk_length_sec, "whisper_chunk_length_sec", 10.0, 3600.0)
+    parsed_whisper_silence_sec = parse_optional_float(whisper_silence_sec, "whisper_silence_sec", 0.1, 30.0)
+    parsed_max_char_chunk_per_sentence = parse_optional_float(max_char_chunk_per_sentence, "max_char_chunk_per_sentence", 20.0, 5000.0)
+    parsed_max_char_chunk = parse_optional_float(max_char_chunk, "max_char_chunk", 50.0, 20000.0)
+    parsed_improve_max_chunk_chars = parse_optional_float(improve_max_chunk_chars, "improve_max_chunk_chars", 500.0, 200000.0)
+
+    return build_project_payload(
+        filename=filename,
+        language=parsed_language,
+        voice=voice,
+        stage_preset=stage_preset,
+        stages_to_run=resolved_stages_to_run,
+        custom_instructions=custom_instructions,
+        tts_api=parsed_tts_api,
+        translation_provider=parsed_translation_provider,
+        elevenlabs_voice_id=elevenlabs_voice_id,
+        voiceover_tempo=parsed_voiceover_tempo,
+        voiceover_shift=parsed_voiceover_shift,
+        normalize_final_audio=parse_optional_bool(normalize_final_audio),
+        max_preview_size_mb=parsed_max_preview_size_mb if parsed_max_preview_size_mb is not None else DEFAULT_MAX_PREVIEW_SIZE_MB,
+        use_subtitles_as_is=parse_optional_bool(use_subtitles_as_is),
+        autogenerate_custom_instructions=parse_optional_bool(autogenerate_custom_instructions),
+        detailed_transcription=parse_bool(detailed_transcription, default=True),
+        whisper_chunk_length_sec=int(parsed_whisper_chunk_length_sec or DEFAULT_WHISPER_CHUNK_LENGTH_SEC),
+        whisper_silence_split=parse_optional_bool(whisper_silence_split),
+        whisper_silence_sec=parsed_whisper_silence_sec if parsed_whisper_silence_sec is not None else DEFAULT_WHISPER_SILENCE_SEC,
+        max_char_chunk_per_sentence=int(parsed_max_char_chunk_per_sentence or DEFAULT_MAX_CHAR_CHUNK_PER_SENTENCE),
+        max_char_chunk=int(parsed_max_char_chunk or DEFAULT_MAX_CHAR_CHUNK),
+        improve_max_chunk_chars=int(parsed_improve_max_chunk_chars or DEFAULT_IMPROVE_MAX_CHUNK_CHARS),
+        subtitle_relative=subtitle_relative,
+        custom_recordings_relative=custom_recordings_relative,
+    )
+
+
 def provider_status() -> dict[str, bool]:
     return {
         "openai": bool(os.getenv("OPENAI_API_KEY")),
@@ -457,37 +535,51 @@ def create_project(
 ) -> dict[str, Any]:
     if not source_url.strip() and (source is None or not source.filename):
         raise HTTPException(status_code=400, detail="Upload a source file or provide a source URL")
-    providers_present = provider_status()
-    if not providers_present["openai"]:
-        raise HTTPException(status_code=400, detail="OPENAI_API_KEY is required")
-
-    parsed_language = parse_target_language(language)
-    parsed_translation_provider = parse_translation_provider(translation_provider)
-    if parsed_translation_provider == "deepl" and not providers_present["deepl"]:
-        raise HTTPException(status_code=400, detail="DEEPL_AUTH_KEY is required for DeepL translation")
-    resolved_stages_to_run = normalize_stage_list(stages_to_run, stage_preset)
-    parsed_tts_api = parse_tts_api(tts_api)
-    if "voiceover" in resolved_stages_to_run and parsed_tts_api == "elevenlabs" and not providers_present["elevenlabs"]:
-        raise HTTPException(status_code=400, detail="ELEVENLABS_API_KEY is required for ElevenLabs TTS")
-    parsed_voiceover_tempo = parse_optional_float(voiceover_tempo, "voiceover_tempo", 0.5, 2.0)
-    parsed_voiceover_shift = parse_optional_float(voiceover_shift, "voiceover_shift", -300.0, 300.0)
-    parsed_max_preview_size_mb = parse_optional_float(max_preview_size_mb, "max_preview_size_mb", 0.1, 500.0)
-    parsed_whisper_chunk_length_sec = parse_optional_float(whisper_chunk_length_sec, "whisper_chunk_length_sec", 10.0, 3600.0)
-    parsed_whisper_silence_sec = parse_optional_float(whisper_silence_sec, "whisper_silence_sec", 0.1, 30.0)
-    parsed_max_char_chunk_per_sentence = parse_optional_float(max_char_chunk_per_sentence, "max_char_chunk_per_sentence", 20.0, 5000.0)
-    parsed_max_char_chunk = parse_optional_float(max_char_chunk, "max_char_chunk", 50.0, 20000.0)
-    parsed_improve_max_chunk_chars = parse_optional_float(improve_max_chunk_chars, "improve_max_chunk_chars", 500.0, 200000.0)
-
-    project_dirs = create_project_root()
-    root = project_dirs.root
-    input_dir = project_dirs.input_dir
-    config_dir = project_dirs.config_dir
 
     if source_url.strip():
         filename = "source.url"
     else:
         assert source is not None
         filename = safe_name(source.filename or "source.mp3")
+    subtitle_name = ""
+    subtitle_relative = ""
+    if subtitle_file and subtitle_file.filename:
+        subtitle_name = f"{Path(filename).stem}.subtitles{Path(safe_name(subtitle_file.filename)).suffix.lower() or '.srt'}"
+        subtitle_relative = f"input/{subtitle_name}"
+    custom_recordings_relative = "input/custom-recordings.zip" if custom_recordings and custom_recordings.filename else ""
+
+    params, metadata = build_configured_project_payload(
+        filename=filename,
+        language=language,
+        voice=voice,
+        stage_preset=stage_preset,
+        stages_to_run=stages_to_run,
+        custom_instructions=custom_instructions,
+        tts_api=tts_api,
+        translation_provider=translation_provider,
+        elevenlabs_voice_id=elevenlabs_voice_id,
+        voiceover_tempo=voiceover_tempo,
+        voiceover_shift=voiceover_shift,
+        normalize_final_audio=normalize_final_audio,
+        max_preview_size_mb=max_preview_size_mb,
+        use_subtitles_as_is=use_subtitles_as_is,
+        autogenerate_custom_instructions=autogenerate_custom_instructions,
+        detailed_transcription=detailed_transcription,
+        whisper_chunk_length_sec=whisper_chunk_length_sec,
+        whisper_silence_split=whisper_silence_split,
+        whisper_silence_sec=whisper_silence_sec,
+        max_char_chunk_per_sentence=max_char_chunk_per_sentence,
+        max_char_chunk=max_char_chunk,
+        improve_max_chunk_chars=improve_max_chunk_chars,
+        subtitle_relative=subtitle_relative,
+        custom_recordings_relative=custom_recordings_relative,
+    )
+
+    project_dirs = create_project_root()
+    root = project_dirs.root
+    input_dir = project_dirs.input_dir
+    config_dir = project_dirs.config_dir
+
     source_path = input_dir / filename
     if source_url.strip():
         write_json(source_path, {"url": source_url.strip()})
@@ -496,53 +588,17 @@ def create_project(
         with source_path.open("wb") as handle:
             shutil.copyfileobj(source.file, handle)
 
-    subtitle_relative = ""
-    if subtitle_file and subtitle_file.filename:
-        subtitle_name = f"{source_path.stem}.subtitles{Path(safe_name(subtitle_file.filename)).suffix.lower() or '.srt'}"
+    if subtitle_name:
         subtitle_path = input_dir / subtitle_name
+        assert subtitle_file is not None
         with subtitle_path.open("wb") as handle:
             shutil.copyfileobj(subtitle_file.file, handle)
-        subtitle_relative = f"input/{subtitle_name}"
 
-    custom_recordings_relative = ""
-    if custom_recordings and custom_recordings.filename:
-        recordings_name = "custom-recordings.zip"
-        recordings_path = input_dir / recordings_name
+    if custom_recordings_relative:
+        recordings_path = input_dir / "custom-recordings.zip"
+        assert custom_recordings is not None
         with recordings_path.open("wb") as handle:
             shutil.copyfileobj(custom_recordings.file, handle)
-        custom_recordings_relative = f"input/{recordings_name}"
-
-    parsed_normalize_final_audio = parse_optional_bool(normalize_final_audio)
-    parsed_use_subtitles_as_is = parse_optional_bool(use_subtitles_as_is)
-    parsed_autogenerate_custom_instructions = parse_optional_bool(autogenerate_custom_instructions)
-    parsed_detailed_transcription = parse_bool(detailed_transcription, default=True)
-
-    params, metadata = build_project_payload(
-        filename=filename,
-        language=parsed_language,
-        voice=voice,
-        stage_preset=stage_preset,
-        stages_to_run=resolved_stages_to_run,
-        custom_instructions=custom_instructions,
-        tts_api=parsed_tts_api,
-        translation_provider=parsed_translation_provider,
-        elevenlabs_voice_id=elevenlabs_voice_id,
-        voiceover_tempo=parsed_voiceover_tempo,
-        voiceover_shift=parsed_voiceover_shift,
-        normalize_final_audio=parsed_normalize_final_audio,
-        max_preview_size_mb=parsed_max_preview_size_mb if parsed_max_preview_size_mb is not None else DEFAULT_MAX_PREVIEW_SIZE_MB,
-        use_subtitles_as_is=parsed_use_subtitles_as_is,
-        autogenerate_custom_instructions=parsed_autogenerate_custom_instructions,
-        detailed_transcription=parsed_detailed_transcription,
-        whisper_chunk_length_sec=int(parsed_whisper_chunk_length_sec or DEFAULT_WHISPER_CHUNK_LENGTH_SEC),
-        whisper_silence_split=parse_optional_bool(whisper_silence_split),
-        whisper_silence_sec=parsed_whisper_silence_sec if parsed_whisper_silence_sec is not None else DEFAULT_WHISPER_SILENCE_SEC,
-        max_char_chunk_per_sentence=int(parsed_max_char_chunk_per_sentence or DEFAULT_MAX_CHAR_CHUNK_PER_SENTENCE),
-        max_char_chunk=int(parsed_max_char_chunk or DEFAULT_MAX_CHAR_CHUNK),
-        improve_max_chunk_chars=int(parsed_improve_max_chunk_chars or DEFAULT_IMPROVE_MAX_CHUNK_CHARS),
-        subtitle_relative=subtitle_relative,
-        custom_recordings_relative=custom_recordings_relative,
-    )
     write_json(config_dir / "params.json", params)
     write_json(source_path.with_suffix(".params.json"), params)
 
@@ -577,6 +633,8 @@ def import_bema_episode(body: ImportBemaEpisodeRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="episode must be between 1 and 9999")
 
     mp3_filename, mp3_content, transcript_text = download_bema_episode(body.episode)
+    if body.include_transcript and not transcript_text:
+        raise HTTPException(status_code=404, detail="BEMA episode transcript could not be downloaded")
     project_dirs = create_project_root()
     source_path = project_dirs.input_dir / mp3_filename
     source_path.write_bytes(mp3_content)
@@ -587,47 +645,23 @@ def import_bema_episode(body: ImportBemaEpisodeRequest) -> dict[str, Any]:
         transcript_path = project_dirs.input_dir / transcript_filename
         transcript_path.write_text(transcript_text, encoding="utf-8")
 
-    params, metadata = build_project_payload(
-        filename=mp3_filename,
-        language="EN",
-        voice="alloy",
-        stage_preset="voiceover",
-        custom_instructions="",
-        tts_api="openai",
-        voiceover_tempo=DEFAULT_VOICEOVER_TEMPO,
-        voiceover_shift=DEFAULT_VOICEOVER_SHIFT,
-        normalize_final_audio=False,
-        max_preview_size_mb=DEFAULT_MAX_PREVIEW_SIZE_MB,
-        use_subtitles_as_is=False,
-        autogenerate_custom_instructions=False,
-        detailed_transcription=True,
-        whisper_chunk_length_sec=DEFAULT_WHISPER_CHUNK_LENGTH_SEC,
-        whisper_silence_split=False,
-        whisper_silence_sec=DEFAULT_WHISPER_SILENCE_SEC,
-        max_char_chunk_per_sentence=DEFAULT_MAX_CHAR_CHUNK_PER_SENTENCE,
-        max_char_chunk=DEFAULT_MAX_CHAR_CHUNK,
-        improve_max_chunk_chars=DEFAULT_IMPROVE_MAX_CHUNK_CHARS,
-    )
-    params["bema_episode"] = body.episode
-    params["bema_url"] = f"https://www.bemadiscipleship.com/{body.episode}"
-    metadata.update(
-        {
-            "id": project_dirs.project_id,
-            "bema_episode": body.episode,
-            "bema_url": f"https://www.bemadiscipleship.com/{body.episode}",
-            "transcript_filename": transcript_filename or None,
-            "transcript_uploaded": bool(transcript_filename),
-        }
-    )
-    write_json(project_dirs.config_dir / "params.json", params)
-    write_json(source_path.with_suffix(".params.json"), params)
+    metadata = {
+        "id": project_dirs.project_id,
+        "created_at": now_iso(),
+        "source_filename": mp3_filename,
+        "source_path": f"input/{mp3_filename}",
+        "bema_episode": body.episode,
+        "bema_url": f"https://www.bemadiscipleship.com/{body.episode}",
+        "transcript_filename": transcript_filename or None,
+        "transcript_uploaded": bool(transcript_filename),
+    }
     write_json(project_dirs.root / "metadata.json", metadata)
     write_json(project_dirs.root / "status.json", {
         "project_id": project_dirs.project_id,
-        "state": "queued",
-        "stage": "queued",
+        "state": "draft",
+        "stage": "configuration",
         "progress": 0,
-        "message": "Waiting for worker",
+        "message": "Audio and transcript imported. Configure the project to start processing.",
         "updated_at": now_iso(),
     })
     write_json(
@@ -635,6 +669,111 @@ def import_bema_episode(body: ImportBemaEpisodeRequest) -> dict[str, Any]:
         {"project_id": project_dirs.project_id, "artifacts": [], "stages": []},
     )
     return project_summary(project_dirs.root)
+
+
+@app.post("/api/projects/{project_id}/start")
+def start_draft_project(
+    project_id: str,
+    subtitle_file: UploadFile | None = File(None),
+    custom_recordings: UploadFile | None = File(None),
+    language: str = Form("EN"),
+    voice: str = Form("alloy"),
+    stage_preset: str = Form("voiceover"),
+    stages_to_run: str = Form(""),
+    custom_instructions: str = Form(""),
+    tts_api: str = Form("openai"),
+    translation_provider: str = Form("openai"),
+    elevenlabs_voice_id: str = Form(""),
+    voiceover_tempo: str = Form(str(DEFAULT_VOICEOVER_TEMPO)),
+    voiceover_shift: str = Form(str(DEFAULT_VOICEOVER_SHIFT)),
+    normalize_final_audio: str = Form(""),
+    max_preview_size_mb: str = Form(str(DEFAULT_MAX_PREVIEW_SIZE_MB)),
+    use_subtitles_as_is: str = Form(""),
+    autogenerate_custom_instructions: str = Form(""),
+    detailed_transcription: str = Form("true"),
+    whisper_chunk_length_sec: str = Form(str(DEFAULT_WHISPER_CHUNK_LENGTH_SEC)),
+    whisper_silence_split: str = Form(""),
+    whisper_silence_sec: str = Form(str(DEFAULT_WHISPER_SILENCE_SEC)),
+    max_char_chunk_per_sentence: str = Form(str(DEFAULT_MAX_CHAR_CHUNK_PER_SENTENCE)),
+    max_char_chunk: str = Form(str(DEFAULT_MAX_CHAR_CHUNK)),
+    improve_max_chunk_chars: str = Form(str(DEFAULT_IMPROVE_MAX_CHUNK_CHARS)),
+) -> dict[str, Any]:
+    root = project_path(project_id)
+    status = read_json(root / "status.json", {})
+    if status.get("state") != "draft":
+        raise HTTPException(status_code=409, detail="Only draft projects can be started")
+
+    source_path = source_path_for_project(root)
+    if source_path is None:
+        raise HTTPException(status_code=400, detail="Draft source file is missing")
+
+    subtitle_name = ""
+    subtitle_relative = ""
+    if subtitle_file and subtitle_file.filename:
+        subtitle_name = f"{source_path.stem}.subtitles{Path(safe_name(subtitle_file.filename)).suffix.lower() or '.srt'}"
+        subtitle_relative = f"input/{subtitle_name}"
+
+    custom_recordings_relative = "input/custom-recordings.zip" if custom_recordings and custom_recordings.filename else ""
+
+    params, configured_metadata = build_configured_project_payload(
+        filename=source_path.name,
+        language=language,
+        voice=voice,
+        stage_preset=stage_preset,
+        stages_to_run=stages_to_run,
+        custom_instructions=custom_instructions,
+        tts_api=tts_api,
+        translation_provider=translation_provider,
+        elevenlabs_voice_id=elevenlabs_voice_id,
+        voiceover_tempo=voiceover_tempo,
+        voiceover_shift=voiceover_shift,
+        normalize_final_audio=normalize_final_audio,
+        max_preview_size_mb=max_preview_size_mb,
+        use_subtitles_as_is=use_subtitles_as_is,
+        autogenerate_custom_instructions=autogenerate_custom_instructions,
+        detailed_transcription=detailed_transcription,
+        whisper_chunk_length_sec=whisper_chunk_length_sec,
+        whisper_silence_split=whisper_silence_split,
+        whisper_silence_sec=whisper_silence_sec,
+        max_char_chunk_per_sentence=max_char_chunk_per_sentence,
+        max_char_chunk=max_char_chunk,
+        improve_max_chunk_chars=improve_max_chunk_chars,
+        subtitle_relative=subtitle_relative,
+        custom_recordings_relative=custom_recordings_relative,
+    )
+    if subtitle_name:
+        subtitle_path = root / "input" / subtitle_name
+        assert subtitle_file is not None
+        with subtitle_path.open("wb") as handle:
+            shutil.copyfileobj(subtitle_file.file, handle)
+    if custom_recordings_relative:
+        recordings_path = root / "input" / "custom-recordings.zip"
+        assert custom_recordings is not None
+        with recordings_path.open("wb") as handle:
+            shutil.copyfileobj(custom_recordings.file, handle)
+
+    metadata = read_json(root / "metadata.json", {})
+    configured_metadata.pop("created_at", None)
+    metadata.update(configured_metadata)
+    metadata["id"] = project_id
+    metadata["configured_at"] = now_iso()
+    if metadata.get("bema_episode") is not None:
+        params["bema_episode"] = metadata["bema_episode"]
+    if metadata.get("bema_url"):
+        params["bema_url"] = metadata["bema_url"]
+
+    write_json(root / "config" / "params.json", params)
+    write_json(source_path.with_suffix(".params.json"), params)
+    write_json(root / "metadata.json", metadata)
+    write_json(root / "status.json", {
+        "project_id": project_id,
+        "state": "queued",
+        "stage": "queued",
+        "progress": 0,
+        "message": "Waiting for worker",
+        "updated_at": now_iso(),
+    })
+    return project_summary(root)
 
 
 @app.get("/api/projects/{project_id}/files/{filename}")

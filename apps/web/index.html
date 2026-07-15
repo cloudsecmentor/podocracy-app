@@ -31,12 +31,12 @@
       </header>
 
       <section class="panel reveal">
-        <h2>New project</h2>
+        <h2 id="project-form-title">New project</h2>
         <p id="form-message" class="message" role="status" aria-live="polite"></p>
         <form id="project-form">
           <input type="hidden" name="translation_provider" value="openai">
 
-          <div class="field-pair">
+          <div class="field-pair" id="source-fields">
             <label>
               Source media
               <input type="file" name="source" accept=".mp3,.mp4,.m4a,.wav,.url,audio/*,video/*">
@@ -150,11 +150,14 @@
                 </label>
                 <button type="button" id="import-bema" class="secondary">Import episode</button>
               </div>
-              <p class="muted">Downloads the episode audio and transcript into a new project.</p>
+              <p class="muted">Downloads the episode audio and transcript as a draft. You can then configure it before processing.</p>
             </div>
           </details>
 
-          <button type="submit">Create project</button>
+          <div class="form-actions">
+            <button type="submit" id="submit-project">Create project</button>
+            <button type="button" id="cancel-draft" class="secondary" hidden>Create a different project</button>
+          </div>
         </form>
       </section>
 
