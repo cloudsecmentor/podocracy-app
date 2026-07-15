@@ -7,7 +7,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+IMPORT_PROJECTS_DIR = tempfile.TemporaryDirectory()
+os.environ["PROJECTS_DIR"] = IMPORT_PROJECTS_DIR.name
+
 import api
+
+
+def tearDownModule() -> None:
+    IMPORT_PROJECTS_DIR.cleanup()
 
 
 class BemaDraftWorkflowTests(unittest.TestCase):
