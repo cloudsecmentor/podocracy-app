@@ -78,6 +78,29 @@ Launcher-specific environment variables:
 - `PODOCRACY_COMPOSE_SOURCE_FILE=docker-compose.yml`
 - `PORTAL_HTTP_PORT=8080` local HTTP port
 
+### Beginner-friendly desktop app (no terminal)
+
+If you don't want to touch a terminal at all, use the double-click desktop launcher. It
+checks Docker for you, creates a `~/Podocracy` folder for your projects, asks for your
+OpenAI API key on first run, starts everything, and opens your browser.
+
+**macOS** — build the app once, then double-click it whenever you want to use Podocracy:
+
+```bash
+./scripts/make-macos-app.sh
+open ./dist/Podocracy.app
+```
+
+**Windows** — run the launcher (or make a shortcut to it so it feels like an app):
+
+```bat
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\podocracy-windows-run.ps1
+```
+
+The first launch asks for your OpenAI API key and writes `.env` for you, so there is no
+file editing. See [docs/desktop-onboarding.md](docs/desktop-onboarding.md) for the full
+design, distribution/signing notes, and the Mac vs. Windows roadmap.
+
 ### Install as a desktop app (PWA)
 
 After the portal is running, open it in Chrome, Edge, or Safari and use the browser's **Install app** option (or **Add to Dock** on macOS).
