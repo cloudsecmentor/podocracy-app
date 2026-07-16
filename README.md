@@ -2,7 +2,59 @@
 
 Self-hosted Docker Compose portal for creating local voiceover translation projects.
 
-## Quick Start With Prebuilt Images
+There are two ways to run it:
+
+- **Desktop app (easiest — no terminal).** Download, double-click, paste your OpenAI key. Start here.
+- **Command line & developers.** Docker Compose and source builds, further down.
+
+---
+
+## Get started (desktop app — no terminal)
+
+You only need two things — **Docker Desktop** and an **OpenAI API key**. The app does the rest: it checks Docker, sets up a project folder, starts the containers, and opens your browser.
+
+### 1. Install Docker Desktop
+
+- macOS / Windows: [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Apple Silicon supported).
+
+Install it and start it once so it can finish setup. (Linux and Colima users: see [Command line & developers](#command-line--developers) below.)
+
+### 2. Get an OpenAI API key
+
+Create one at **[platform.openai.com/api-keys](https://platform.openai.com/api-keys)**: sign in, click **Create new secret key**, and copy it (it starts with `sk-`). You will paste it into Podocracy on first launch — there is no file to edit. Keep the key private.
+
+### 3. Download and open Podocracy
+
+Download the latest build from the **[Releases page](https://github.com/cloudsecmentor/podocracy-app/releases/latest)**:
+
+- **macOS** — download `Podocracy-macos-<version>.zip`, unzip it, then **right-click `Podocracy.app` → Open** the first time (needed once for unsigned apps).
+- **Windows** — download `Podocracy-windows-<version>.zip`, unzip it, then double-click **`Podocracy.cmd`**. If Windows SmartScreen warns, choose **More info → Run anyway**.
+
+On first launch the app will:
+
+1. check that Docker is installed and running (and start Docker for you if needed),
+2. ask which folder to use — it can **adopt an existing setup** or create a new `~/Podocracy` folder for your projects,
+3. ask for your **OpenAI API key** and write the configuration for you,
+4. start everything, wait until it is ready, and open `http://localhost:8080`.
+
+After that, just open the app again anytime — it starts the containers and reopens the page. No terminal and no bookmark needed; pin it to your Dock or Taskbar for one-click access.
+
+Want to build the app yourself, or read the design, folder-selection, and code-signing details? See **[docs/desktop-onboarding.md](docs/desktop-onboarding.md)**. Short version:
+
+- **macOS:** `./scripts/make-macos-app.sh` then `open ./dist/Podocracy.app`
+- **Windows:** `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\podocracy-windows-run.ps1`
+
+### Install as a home-screen app (PWA), optional
+
+Once the portal is open, use your browser's **Install app** option (or **Add to Dock** on macOS) for a standalone window. Note this only opens the page — the desktop app above is what starts Docker and the containers.
+
+---
+
+## Command line & developers
+
+Everything below is for people who prefer the terminal and for developers building from source.
+
+### Quick start with prebuilt images
 
 Install Docker first:
 
@@ -21,7 +73,7 @@ cd "$HOME/podocracy-worker-portal"
 
 Create your `.env` by copying [.env.example](.env.example), then fill in at least:
 
-- `OPENAI_API_KEY` (required)
+- `OPENAI_API_KEY` (required) — get one at [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
 - `PORTAL_ADMIN_PASSWORD` (strongly recommended whenever the portal is reachable from other machines)
 
 `.env.example` is the source of truth for supported provider keys (OpenAI, DeepL, ElevenLabs) and common runtime options.
@@ -42,7 +94,7 @@ Open `http://localhost:8080`.
 
 First startup can take a while: Docker may pull large images, and the worker may spend extra time caching Whisper artifacts before the first job completes.
 
-### One-click launch
+### One-click launch scripts
 
 From the app folder (where your compose file and `.env` live), you can start the portal and open your browser in one step:
 
@@ -77,33 +129,6 @@ Launcher-specific environment variables:
 - `PODOCRACY_COMPOSE_IMAGES_FILE=docker-compose.images.yml`
 - `PODOCRACY_COMPOSE_SOURCE_FILE=docker-compose.yml`
 - `PORTAL_HTTP_PORT=8080` local HTTP port
-
-### Beginner-friendly desktop app (no terminal)
-
-If you don't want to touch a terminal at all, use the double-click desktop launcher. It
-checks Docker for you, creates a `~/Podocracy` folder for your projects, asks for your
-OpenAI API key on first run, starts everything, and opens your browser.
-
-**macOS** — build the app once, then double-click it whenever you want to use Podocracy:
-
-```bash
-./scripts/make-macos-app.sh
-open ./dist/Podocracy.app
-```
-
-**Windows** — run the launcher (or make a shortcut to it so it feels like an app):
-
-```bat
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\podocracy-windows-run.ps1
-```
-
-The first launch asks for your OpenAI API key and writes `.env` for you, so there is no
-file editing. See [docs/desktop-onboarding.md](docs/desktop-onboarding.md) for the full
-design, distribution/signing notes, and the Mac vs. Windows roadmap.
-
-### Install as a desktop app (PWA)
-
-After the portal is running, open it in Chrome, Edge, or Safari and use the browser's **Install app** option (or **Add to Dock** on macOS).
 
 ### Update / Stop / Restart
 
@@ -147,7 +172,7 @@ On Colima, start the daemon first:
 colima start
 ```
 
-## Environment Variables Reference
+### Environment Variables Reference
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -168,13 +193,15 @@ colima start
 | `PODOCRACY_LAUNCH_TIMEOUT` | `90` | Launcher health-check timeout in seconds. |
 | `PODOCRACY_COMPOSE_IMAGES_FILE` | `docker-compose.images.yml` | Images compose file path for launchers. |
 | `PODOCRACY_COMPOSE_SOURCE_FILE` | `docker-compose.yml` | Source compose file path for launchers. |
+| `PODOCRACY_HOME` | desktop app: `~/Podocracy` | Desktop app home folder (compose file, `.env`, `logs/`, `projects/`). |
+| `PODOCRACY_CONFIG_DIR` | `~/.config/podocracy` (mac) / `%APPDATA%\Podocracy` (win) | Where the desktop app remembers your chosen folder. |
 
 Env file rule:
 
 - If `.env` is next to your compose file, Compose loads it automatically.
 - Use `--env-file` only when your env file lives elsewhere.
 
-## Local Source Run
+### Local Source Run
 
 ```bash
 export PODOCRACY_ENV_FILE=/absolute/path/to/provider.env
@@ -184,7 +211,7 @@ export PODOCRACY_PROJECTS_DIR="$HOME/podocracy-projects"
 
 Open `http://localhost:8080`.
 
-## Prebuilt Images From Repo Checkout
+### Prebuilt Images From Repo Checkout
 
 ```bash
 export PODOCRACY_ENV_FILE=/absolute/path/to/provider.env
@@ -195,17 +222,23 @@ docker compose -f docker-compose.images.yml pull
 docker compose -f docker-compose.images.yml up -d
 ```
 
-See [docs/releases.md](docs/releases.md) for release tagging and image publishing.
+### Releases
 
-## Troubleshooting
+Each release publishes multi-arch container images **and** the ready-to-run macOS
+(`Podocracy-macos-<version>.zip`) and Windows (`Podocracy-windows-<version>.zip`) desktop
+wrappers as GitHub Release assets. See [docs/releases.md](docs/releases.md) for release
+tagging, image publishing, and how the wrappers are built.
+
+### Troubleshooting
 
 - **Port 8080 already in use:** set `PORTAL_HTTP_PORT` (for example `PORTAL_HTTP_PORT=8081`) and restart.
 - **Launcher times out waiting for health:** increase `PODOCRACY_LAUNCH_TIMEOUT` and check logs.
 - **Where to see logs:**
   - Stack logs: `docker compose -f docker-compose.images.yml logs`
   - Project logs: per-project `logs/` under `PODOCRACY_PROJECTS_DIR`
+  - Desktop app launch log: `<app home>/logs/launch.log` (for example `~/Podocracy/logs/launch.log`)
 
-## Test Upload
+### Test Upload
 
 Use the web UI, or call the API through the web proxy:
 
@@ -216,7 +249,7 @@ curl -F "source=@/path/to/file.mp3" \
   http://localhost:8080/api/projects
 ```
 
-## Remote Ubuntu
+### Remote Ubuntu
 
 See [docs/remote-ubuntu-setup.md](docs/remote-ubuntu-setup.md) and keep `PORTAL_ADMIN_PASSWORD` set when exposing the portal remotely.
 
