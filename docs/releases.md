@@ -31,8 +31,26 @@ Apple Silicon (M1/M2/M3) and Intel/AMD Linux hosts use the same tag; Docker pull
 
 5. Also pushes `latest` for each image when `latest: true`.
 6. Creates a GitHub Release for the version.
+7. Builds and attaches the desktop wrappers to that release (see below).
 
 Version tags are immutable. Do not reuse `v0.1.0` for a changed build; publish `v0.1.1`.
+
+## Desktop Wrapper Assets
+
+After the GitHub Release is created, two extra jobs attach the beginner desktop apps as
+release assets (see [desktop-onboarding.md](desktop-onboarding.md)):
+
+- `macos-wrapper` runs on `macos-latest`, builds `Podocracy.app` with
+  `scripts/make-macos-app.sh` (icon included via `sips`/`iconutil`), and uploads
+  `Podocracy-macos-<version>.zip` (the app plus `packaging/macos/READ-ME-FIRST.txt`).
+- `windows-wrapper` packages `scripts/podocracy-windows-run.ps1` together with
+  `packaging/windows/Podocracy.cmd` and its read-me into
+  `Podocracy-windows-<version>.zip`.
+
+Both jobs `needs: release`, so they upload with `gh release upload <version> ... --clobber`
+only after the release exists. If a wrapper job fails, the images and release are already
+published; just re-run that job. The macOS app is unsigned — users open it once with
+right-click → Open (or notarize it before wide distribution).
 
 ## Publishing a Release
 

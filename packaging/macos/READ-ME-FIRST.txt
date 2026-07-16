@@ -1,0 +1,19 @@
+Podocracy for macOS
+===================
+
+1. Install Docker Desktop and open it once so it can finish setup.
+   Get it at https://www.docker.com/products/docker-desktop/
+
+2. The first time you open Podocracy, macOS may block it because it is not
+   signed by an identified developer. To open it:
+     - Right-click (or Control-click) Podocracy.app and choose "Open",
+       then click "Open" again in the dialog.
+   You only need to do this once. After that a normal double-click works.
+
+3. On first launch Podocracy asks which folder to use and for your OpenAI
+   API key (get one at https://platform.openai.com/api-keys), then sets
+   everything up for you. After that, just open Podocracy whenever you want
+   to use it - it starts Docker and the app and opens your browser.
+
+Tip: drag Podocracy.app into your Dock (or /Applications) for one-click access.
+Your projects and settings live in the ~/Podocracy folder by default.
