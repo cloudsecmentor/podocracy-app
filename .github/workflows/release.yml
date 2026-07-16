@@ -20,6 +20,10 @@ jobs:
     name: Build and publish release images
     runs-on: ubuntu-latest
 
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      latest: ${{ steps.release.outputs.latest }}
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -166,3 +170,68 @@ jobs:
           } > "${notes}"
 
           gh release create "${version}" --title "${version}" --notes-file "${notes}"
+
+  macos-wrapper:
+    name: Build and attach macOS desktop app
+    needs: release
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build Podocracy.app
+        run: bash ./scripts/make-macos-app.sh dist
+
+      - name: Package app bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.release.outputs.version }}"
+          stage="Podocracy"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          cp -R "dist/Podocracy.app" "$stage/"
+          cp "packaging/macos/READ-ME-FIRST.txt" "$stage/"
+          # ditto preserves the .app bundle (symlinks, exec bits, resource forks).
+          ditto -c -k --sequesterRsrc "$stage" "Podocracy-macos-${version}.zip"
+
+      - name: Attach to GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.release.outputs.version }}"
+          gh release upload "${version}" "Podocracy-macos-${version}.zip" --clobber
+
+  windows-wrapper:
+    name: Package and attach Windows launcher
+    needs: release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Package Windows launcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.release.outputs.version }}"
+          stage="Podocracy"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          cp "scripts/podocracy-windows-run.ps1" "$stage/"
+          cp "packaging/windows/Podocracy.cmd" "$stage/"
+          cp "packaging/windows/READ-ME-FIRST.txt" "$stage/"
+          zip -r "Podocracy-windows-${version}.zip" "$stage"
+
+      - name: Attach to GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.release.outputs.version }}"
+          gh release upload "${version}" "Podocracy-windows-${version}.zip" --clobber

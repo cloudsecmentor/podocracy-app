@@ -1,0 +1,17 @@
+Podocracy for Windows
+=====================
+
+1. Install Docker Desktop and open it once so it can finish setup.
+   Get it at https://www.docker.com/products/docker-desktop/
+
+2. Double-click "Podocracy.cmd" to start Podocracy.
+   If Windows SmartScreen warns you, click "More info" then "Run anyway".
+   (Optional: right-click Podocracy.cmd -> Send to -> Desktop to make a
+   shortcut, or pin it to the Taskbar for one-click access.)
+
+3. On first launch Podocracy asks which folder to use and for your OpenAI
+   API key (get one at https://platform.openai.com/api-keys), then sets
+   everything up for you. After that, just run Podocracy whenever you want
+   to use it - it starts Docker and the app and opens your browser.
+
+Your projects and settings live in the %USERPROFILE%\Podocracy folder by default.
