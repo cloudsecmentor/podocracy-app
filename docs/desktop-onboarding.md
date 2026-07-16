@@ -85,6 +85,37 @@ Introduce a single home directory that the desktop app owns and the user can fin
   `%AppData%`) means a beginner can actually open it in Finder/Explorer to see their
   output files.
 
+### 4.1 Will `~/Podocracy` work as a bind mount? (yes)
+
+The containers bind-mount the projects folder into `/data/projects`
+(`${PODOCRACY_PROJECTS_DIR:-./projects}` in `docker-compose.images.yml`). `~/Podocracy`
+is a safe default because:
+
+- **It is inside the auto-shared home directory.** Docker Desktop on macOS shares
+  `/Users` by default, and the WSL2 backend on Windows shares the user profile
+  automatically, so `~/Podocracy` (`/Users/<name>/Podocracy` or
+  `C:\Users\<name>\Podocracy`) can be bind-mounted with no File Sharing changes. A path
+  under `~` is specifically chosen to avoid the "path is not shared from the host" error
+  that hits folders outside the shared roots.
+- **No permission surprises.** With the Docker Desktop VM, files written to the bind
+  mount appear owned by the user on the host, so projects are readable/editable in
+  Finder/Explorer.
+- **The Compose project name stays stable.** Because the launcher always runs from
+  `~/Podocracy`, Compose derives the same project name (`podocracy`) every time, so it
+  reuses the same containers/volumes instead of creating duplicates.
+- **`.env` auto-loads.** Compose reads `.env` from the working directory, and the
+  launcher `cd`s into `~/Podocracy` before starting, so keys load without `--env-file`.
+
+Minor things to keep in mind (all handled by the scripts):
+
+- **Spaces in the home path** (e.g. `C:\Users\First Last`) — the launchers quote paths, so
+  this works, but it is the main reason to keep the folder name itself simple.
+- **iCloud** — `~/Podocracy` is deliberately not under `~/Desktop` or `~/Documents`, which
+  can be synced to iCloud on macOS; you do not want large media/artifacts syncing to the
+  cloud.
+- **Linux** (not the primary beginner target) can hit root-owned files from the bind
+  mount; Docker Desktop for Mac/Windows does not.
+
 ---
 
 ## 5. macOS experience
@@ -234,6 +265,42 @@ the app's own installer so "install Docker" and "install Podocracy" feel like on
   Containers keep running in Docker in the background (`restart: unless-stopped`).
 - **Stopping:** beginners rarely need to stop containers, but provide an obvious path —
   a "Stop Podocracy" companion app/shortcut, or the menu-bar "Stop" button in Phase 2.
+
+### 9.1 What the second launch looks like (everyday use)
+
+The desktop app is the **single, reusable entry point** — the user keeps the same icon and
+double-clicks it every time. They do **not** manually start Docker, run any container
+command, or type a URL. On every launch after the first, the runtime:
+
+1. **Skips setup.** The `~/Podocracy` folder, compose file, and `.env` already exist, so
+   there is no download and no key wizard (only the first run asks for the key).
+2. **Starts Docker if needed.** If Docker Desktop is not running, the app starts it and
+   waits for the daemon, so the user never has to open Docker themselves.
+3. **Ensures containers are up.** `docker compose up -d` is idempotent: if the stack is
+   already running it is a fast no-op; if it is not (e.g. after a reboot), it starts it.
+   Because the compose services use `restart: unless-stopped`, they also come back on
+   their own when Docker starts — the `up -d` just guarantees it.
+4. **Opens the browser and quits.** It re-opens `http://localhost:8080` in the default
+   browser once the health check passes.
+
+So the everyday flow is: **double-click the icon → wait a moment → the portal opens.**
+The second launch is much faster than the first because images are already pulled and
+Whisper artifacts are cached.
+
+### 9.2 Do they need a bookmark? (no)
+
+No bookmark is required — the app opens the page for the user every time. To make it feel
+like a "real app":
+
+- **macOS:** drag `Podocracy.app` into the Dock (or keep it in `/Applications`) and click
+  it whenever needed. Right-click → **Keep in Dock** to pin it.
+- **Windows:** pin the launcher's `.lnk` shortcut to the Taskbar or Start menu.
+
+A bookmark or the browser's **Install app / Add to Dock** (PWA) option is optional and
+only useful as a shortcut *while the containers are already running* — importantly, the
+PWA/bookmark does **not** start Docker or the containers, so it will show a
+connection error if the stack is down. For that reason the launcher app (not a bookmark)
+should be the primary way beginners open Podocracy; the PWA is a convenience on top.
 
 ---
 
