@@ -44,10 +44,6 @@ Want to build the app yourself, or read the design, folder-selection, and code-s
 - **macOS:** `./scripts/make-macos-app.sh` then `open ./dist/Podocracy.app`
 - **Windows:** `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\podocracy-windows-run.ps1`
 
-### Install as a home-screen app (PWA), optional
-
-Once the portal is open, use your browser's **Install app** option (or **Add to Dock** on macOS) for a standalone window. Note this only opens the page — the desktop app above is what starts Docker and the containers.
-
 ---
 
 ## Command line & developers
@@ -129,6 +125,10 @@ Launcher-specific environment variables:
 - `PODOCRACY_COMPOSE_IMAGES_FILE=docker-compose.images.yml`
 - `PODOCRACY_COMPOSE_SOURCE_FILE=docker-compose.yml`
 - `PORTAL_HTTP_PORT=8080` local HTTP port
+
+### Standalone window (PWA), optional
+
+While the portal is running, your browser's **Install app** / **Add to Dock** option gives a standalone window. It only opens the page — use the desktop app to actually start Docker and the containers.
 
 ### Update / Stop / Restart
 
