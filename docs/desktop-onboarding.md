@@ -116,6 +116,34 @@ Minor things to keep in mind (all handled by the scripts):
 - **Linux** (not the primary beginner target) can hit root-owned files from the bind
   mount; Docker Desktop for Mac/Windows does not.
 
+### 4.2 Adopting an existing command-line setup
+
+Users who already ran the CLI Quick Start have a folder (often
+`~/podocracy-worker-portal`) with their own `.env` and compose file. The desktop app must
+not ignore that and silently create a second, empty setup. So on the **first run** it asks
+which folder to use:
+
+1. **Auto-detect.** It looks for an existing setup in the common spots
+   (`~/podocracy-worker-portal`, `~/Podocracy`, `~/podocracy`). A folder "counts" if it
+   already contains a `.env` or a compose file.
+2. **Offer choices.** If one is found: *Use this one* / *Choose another…* / *Create new*.
+   If none is found: *Choose existing…* (a native folder picker) / *Create new*.
+3. **Respect what's already there.** When the chosen folder already has:
+   - a `.env` → the API-key wizard is **skipped** (the existing keys are detected and
+     reused), and its `PODOCRACY_PROJECTS_DIR` and `PORTAL_HTTP_PORT` are honored, so the
+     user's existing projects and custom port keep working and the browser opens on the
+     right port;
+   - a compose file (images **or** a source checkout's `docker-compose.yml`) → nothing is
+     downloaded, so the adopted setup is never clobbered.
+4. **Remember the choice.** The selected folder is saved to a tiny config file
+   (`~/.config/podocracy/home.path` on macOS, `%APPDATA%\Podocracy\home.path` on Windows),
+   so every later launch goes straight to that folder without asking again.
+
+Power users can still force a folder with `PODOCRACY_HOME=/path`, and can re-trigger the
+chooser by deleting the config file. This means the answer to "can they pick their
+existing directory and have the app detect the existing `.env`?" is **yes** — via
+auto-detection, an explicit folder picker, and reuse of the existing `.env`/port/projects.
+
 ---
 
 ## 5. macOS experience
@@ -141,10 +169,13 @@ Double-clicking the app runs `scripts/podocracy-app-runtime.sh`, which:
    Desktop download page (or `brew install --cask docker` when Homebrew is present),
    then quits. If Docker is installed but the daemon is not running, it runs
    `open -a Docker` and waits (with a progress notification) for the daemon.
-2. **Ensures the app home** (`~/Podocracy`) exists and downloads
-   `docker-compose.images.yml` if it is missing.
-3. **Runs the first-run wizard** when `.env` is absent: a secure (hidden-answer) dialog
-   asks for the OpenAI API key (and optionally DeepL/ElevenLabs), then writes `.env`.
+2. **Resolves the app home.** On first run it asks which folder to use — auto-detecting an
+   existing CLI setup and offering *Use this one / Choose another… / Create new* (see
+   §4.2) — then remembers the choice. It downloads `docker-compose.images.yml` only when
+   the folder has no compose file.
+3. **Runs the first-run wizard** only when the chosen folder has no `.env`: a secure
+   (hidden-answer) dialog asks for the OpenAI API key (and optionally DeepL/ElevenLabs),
+   then writes `.env`. An adopted folder with an existing `.env` skips this entirely.
 4. **Starts the stack** using the same `compose_up` / `wait_for_portal` functions as the
    CLI launcher, logging to `~/Podocracy/logs/launch.log`.
 5. **Opens `http://localhost:8080`** in the default browser and **quits**.
@@ -200,8 +231,11 @@ script that mirrors the macOS runtime using native dialogs (`MessageBox` / `Inpu
 1. Detects Docker (`docker` on PATH + `docker info`). If missing, offers to open the
    Docker Desktop download page or run `winget install -e --id Docker.DockerDesktop`.
    If installed but not running, starts Docker Desktop and waits for the daemon.
-2. Ensures `%USERPROFILE%\Podocracy` and downloads the compose file if missing.
-3. Prompts for the OpenAI key with a masked input box and writes `.env`.
+2. Resolves the app home the same way as macOS: auto-detects an existing CLI setup, offers
+   a folder picker (`FolderBrowserDialog`) or *Create new*, remembers the choice in
+   `%APPDATA%\Podocracy\home.path`, and downloads the compose file only when missing.
+3. Prompts for the OpenAI key with a masked input box and writes `.env` — skipped when the
+   adopted folder already has one (its port/projects settings are reused).
 4. Starts the stack, waits for `/api/health`, opens the default browser, and exits.
 
 To make it feel like an app (no visible console), ship one of:
@@ -272,8 +306,9 @@ The desktop app is the **single, reusable entry point** — the user keeps the s
 double-clicks it every time. They do **not** manually start Docker, run any container
 command, or type a URL. On every launch after the first, the runtime:
 
-1. **Skips setup.** The `~/Podocracy` folder, compose file, and `.env` already exist, so
-   there is no download and no key wizard (only the first run asks for the key).
+1. **Skips setup.** It goes straight to the remembered folder (no folder prompt after the
+   first run), and because the compose file and `.env` already exist there is no download
+   and no key wizard (only the first run asks which folder to use and for the key).
 2. **Starts Docker if needed.** If Docker Desktop is not running, the app starts it and
    waits for the daemon, so the user never has to open Docker themselves.
 3. **Ensures containers are up.** `docker compose up -d` is idempotent: if the stack is
