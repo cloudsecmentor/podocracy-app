@@ -23,17 +23,26 @@ else
   exit 1
 fi
 
-PODOCRACY_HOME="${PODOCRACY_HOME:-$HOME/Podocracy}"
+# Explicit overrides (power users / tests). Empty means "not set by the user".
+PODOCRACY_HOME_ENV="${PODOCRACY_HOME:-}"
+PODOCRACY_PROJECTS_DIR_ENV="${PODOCRACY_PROJECTS_DIR:-}"
+PORTAL_HTTP_PORT_ENV="${PORTAL_HTTP_PORT:-}"
+
+PODOCRACY_HOME=""                    # resolved in resolve_home()
+DEFAULT_HOME="$HOME/Podocracy"
 PODOCRACY_RAW_BASE="${PODOCRACY_RAW_BASE:-https://raw.githubusercontent.com/cloudsecmentor/podocracy-app/main}"
-COMPOSE_FILE="${PODOCRACY_COMPOSE_IMAGES_FILE:-docker-compose.images.yml}"
+IMAGES_COMPOSE_FILE="${PODOCRACY_COMPOSE_IMAGES_FILE:-docker-compose.images.yml}"
+SOURCE_COMPOSE_FILE="${PODOCRACY_COMPOSE_SOURCE_FILE:-docker-compose.yml}"
+COMPOSE_FILE="$IMAGES_COMPOSE_FILE"  # re-resolved against the chosen folder in ensure_home()
 PORT="${PORTAL_HTTP_PORT:-8080}"
 URL="http://localhost:${PORT}"
 DOCKER_DOWNLOAD_URL="https://www.docker.com/products/docker-desktop/"
 OPENAI_KEYS_URL="https://platform.openai.com/api-keys"
 
-# Keep all user data (compose file, .env, logs, projects) in one visible folder.
-export PODOCRACY_PROJECTS_DIR="${PODOCRACY_PROJECTS_DIR:-$PODOCRACY_HOME/projects}"
-LOG_FILE="$PODOCRACY_HOME/logs/launch.log"
+# Remembers which folder the user picked, so we only ask on the very first run.
+CONFIG_DIR="${PODOCRACY_CONFIG_DIR:-$HOME/.config/podocracy}"
+CONFIG_FILE="$CONFIG_DIR/home.path"
+LOG_FILE=""                          # set once PODOCRACY_HOME is known
 
 # ----------------------------------------------------------------------------
 # macOS GUI helpers (osascript). Messages are escaped for AppleScript strings.
@@ -80,6 +89,34 @@ OSA
   printf '%s' "$out"
 }
 
+# gui_choose TITLE MESSAGE DEFAULT BTN1 [BTN2] [BTN3] -> prints the pressed button label
+# (empty if the user cancels). AppleScript allows at most three buttons.
+gui_choose() {
+  local title message def list b
+  title="$(escape_osa "$1")"
+  message="$(escape_osa "$2")"
+  def="$(escape_osa "$3")"
+  shift 3
+  list=""
+  for b in "$@"; do
+    b="$(escape_osa "$b")"
+    if [[ -z "$list" ]]; then list="\"$b\""; else list="$list, \"$b\""; fi
+  done
+  osascript 2>/dev/null <<OSA || true
+button returned of (display dialog "${message}" with title "${title}" buttons {${list}} default button "${def}")
+OSA
+}
+
+# choose_folder -> prints a POSIX path chosen by the user; returns 1 if cancelled.
+choose_folder() {
+  local p
+  p="$(osascript 2>/dev/null <<'OSA'
+POSIX path of (choose folder with prompt "Select your existing Podocracy folder")
+OSA
+)" || return 1
+  printf '%s' "${p%/}"
+}
+
 notify() {
   local message
   message="$(escape_osa "$1")"
@@ -95,6 +132,122 @@ tell application "Terminal"
   do script "${cmd}"
 end tell
 OSA
+}
+
+# ----------------------------------------------------------------------------
+# Home-folder resolution (supports adopting an existing CLI setup)
+# ----------------------------------------------------------------------------
+
+# read_env_value FILE KEY -> prints the value of KEY=... from a .env file (last wins).
+read_env_value() {
+  local file="$1" key="$2" line val
+  [[ -f "$file" ]] || return 0
+  line="$(grep -E "^[[:space:]]*${key}=" "$file" 2>/dev/null | tail -n1 || true)"
+  [[ -z "$line" ]] && return 0
+  val="${line#*=}"
+  val="${val%\"}"; val="${val#\"}"
+  val="${val%\'}"; val="${val#\'}"
+  printf '%s' "$val"
+}
+
+# Does a folder already look like a Podocracy setup?
+is_podocracy_dir() {
+  local d="$1"
+  [[ -f "$d/.env" || -f "$d/$IMAGES_COMPOSE_FILE" || -f "$d/$SOURCE_COMPOSE_FILE" ]]
+}
+
+# Print the first known folder that already contains a Podocracy setup, if any.
+detect_existing_home() {
+  local c
+  for c in "$HOME/podocracy-worker-portal" "$HOME/Podocracy" "$HOME/podocracy"; do
+    if is_podocracy_dir "$c"; then
+      printf '%s' "$c"
+      return 0
+    fi
+  done
+  return 0
+}
+
+save_home() {
+  mkdir -p "$CONFIG_DIR" 2>/dev/null || true
+  printf '%s\n' "$PODOCRACY_HOME" > "$CONFIG_FILE" 2>/dev/null || true
+}
+
+first_run_choose_home() {
+  local found choice
+  found="$(detect_existing_home)"
+
+  if [[ -n "$found" ]]; then
+    choice="$(gui_choose "Set up Podocracy" \
+      "Found an existing Podocracy setup at: $found. Use it, pick a different folder, or create a new one at $DEFAULT_HOME?" \
+      "Use this one" "Use this one" "Choose another..." "Create new")"
+    case "$choice" in
+      "Use this one") PODOCRACY_HOME="$found" ;;
+      "Choose another...") PODOCRACY_HOME="$(choose_folder || printf '%s' "$DEFAULT_HOME")" ;;
+      "Create new") PODOCRACY_HOME="$DEFAULT_HOME" ;;
+      *) PODOCRACY_HOME="$found" ;;
+    esac
+  else
+    choice="$(gui_choose "Set up Podocracy" \
+      "Do you already have a Podocracy folder (for example from the command-line setup)? Choose it, or create a new one at $DEFAULT_HOME." \
+      "Create new" "Choose existing..." "Create new")"
+    case "$choice" in
+      "Choose existing...") PODOCRACY_HOME="$(choose_folder || printf '%s' "$DEFAULT_HOME")" ;;
+      *) PODOCRACY_HOME="$DEFAULT_HOME" ;;
+    esac
+  fi
+
+  [[ -z "$PODOCRACY_HOME" ]] && PODOCRACY_HOME="$DEFAULT_HOME"
+  save_home
+}
+
+resolve_home() {
+  # 1. Explicit env override wins and is not persisted.
+  if [[ -n "$PODOCRACY_HOME_ENV" ]]; then
+    PODOCRACY_HOME="$PODOCRACY_HOME_ENV"
+    return 0
+  fi
+  # 2. Remembered choice from a previous run.
+  if [[ -f "$CONFIG_FILE" ]]; then
+    local saved
+    saved="$(head -n1 "$CONFIG_FILE" 2>/dev/null || true)"
+    if [[ -n "$saved" && -d "$saved" ]]; then
+      PODOCRACY_HOME="$saved"
+      return 0
+    fi
+  fi
+  # 3. First run: ask the user (auto-detecting an existing setup).
+  first_run_choose_home
+}
+
+# Respect an existing setup's projects dir / port instead of forcing our defaults.
+setup_projects_dir() {
+  if [[ -n "$PODOCRACY_PROJECTS_DIR_ENV" ]]; then
+    export PODOCRACY_PROJECTS_DIR="$PODOCRACY_PROJECTS_DIR_ENV"
+    return 0
+  fi
+  local from_env
+  from_env="$(read_env_value "$PODOCRACY_HOME/.env" PODOCRACY_PROJECTS_DIR)"
+  if [[ -n "$from_env" ]]; then
+    # The adopted .env already defines it; let Compose read it from .env.
+    unset PODOCRACY_PROJECTS_DIR 2>/dev/null || true
+  else
+    export PODOCRACY_PROJECTS_DIR="$PODOCRACY_HOME/projects"
+  fi
+}
+
+setup_port() {
+  if [[ -n "$PORTAL_HTTP_PORT_ENV" ]]; then
+    PORT="$PORTAL_HTTP_PORT_ENV"
+    URL="http://localhost:${PORT}"
+    return 0
+  fi
+  local p
+  p="$(read_env_value "$PODOCRACY_HOME/.env" PORTAL_HTTP_PORT)"
+  if [[ -n "$p" ]]; then
+    PORT="$p"
+    URL="http://localhost:${PORT}"
+  fi
 }
 
 # ----------------------------------------------------------------------------
@@ -132,16 +285,25 @@ ensure_docker_desktop() {
 
 ensure_home() {
   if ! mkdir -p "$PODOCRACY_HOME/projects" "$PODOCRACY_HOME/logs" 2>/dev/null; then
-    gui_alert "Setup failed" "Podocracy couldn't create its folder at: $PODOCRACY_HOME"
+    gui_alert "Setup failed" "Podocracy couldn't create or open its folder at: $PODOCRACY_HOME"
     exit 1
   fi
 
-  if [[ ! -f "$PODOCRACY_HOME/$COMPOSE_FILE" ]]; then
+  # Only download the images compose file when the folder has no compose file at all,
+  # so we don't clobber an adopted setup (images or source checkout).
+  if [[ ! -f "$PODOCRACY_HOME/$IMAGES_COMPOSE_FILE" && ! -f "$PODOCRACY_HOME/$SOURCE_COMPOSE_FILE" ]]; then
     notify "Downloading Podocracy configuration…"
-    if ! curl -fsSL "$PODOCRACY_RAW_BASE/$COMPOSE_FILE" -o "$PODOCRACY_HOME/$COMPOSE_FILE"; then
+    if ! curl -fsSL "$PODOCRACY_RAW_BASE/$IMAGES_COMPOSE_FILE" -o "$PODOCRACY_HOME/$IMAGES_COMPOSE_FILE"; then
       gui_alert "Download failed" "Couldn't download the Podocracy configuration. Check your internet connection and open Podocracy again."
       exit 1
     fi
+  fi
+
+  # Prefer the images compose file, fall back to a source checkout's compose file.
+  if [[ -f "$PODOCRACY_HOME/$IMAGES_COMPOSE_FILE" ]]; then
+    COMPOSE_FILE="$IMAGES_COMPOSE_FILE"
+  else
+    COMPOSE_FILE="$SOURCE_COMPOSE_FILE"
   fi
 }
 
@@ -199,8 +361,12 @@ launch_stack() {
 
 main() {
   ensure_docker_desktop
+  resolve_home
   ensure_home
+  LOG_FILE="$PODOCRACY_HOME/logs/launch.log"
   cd "$PODOCRACY_HOME"
+  setup_projects_dir
+  setup_port
   # Route all launcher output to the log now that the home folder exists.
   exec >>"$LOG_FILE" 2>&1
   ensure_env
