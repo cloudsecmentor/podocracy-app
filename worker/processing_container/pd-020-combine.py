@@ -1,4 +1,5 @@
 from shared_functions import *
+from speaker_diarization import assign_speakers_to_words, diarize_speakers
 
 
 def get_words_timings_from_raw(transcript_raw):
@@ -55,6 +56,8 @@ def split_text_to_words_with_start_time(chunk) -> dict:
             "start": word["start"],
             "end": word["end"],
         }
+        if word.get("speaker") is not None:
+            word_data["speaker"] = word["speaker"]
         words_with_time.append(word_data)
 
     return words_with_time
@@ -108,6 +111,28 @@ def main(path):
 
     import json
     transcript_raw = json.loads( get_palintext_content(path_raw) )
+
+    if parse_legacy_bool(get_params("speaker_recognition", path=path)):
+        number_of_speakers = max(1, min(20, int(get_params("number_of_speakers", path=path))))
+        local_path = get_local_path_with_download(path)
+        mp3_local_path = naming_convention(local_path, "mp3")
+        speaker_turns = diarize_speakers(
+            mp3_local_path,
+            number_of_speakers,
+            logging.getLogger(__name__),
+        )
+        for segment in transcript_raw.get("segments", []):
+            segment["words"] = assign_speakers_to_words(segment.get("words", []), speaker_turns)
+        transcript_raw["speaker_diarization"] = speaker_turns
+        save_json_with_upload(path_raw, transcript_raw)
+        save_json_with_upload(
+            naming_convention(path, "diarization"),
+            {
+                "number_of_speakers": number_of_speakers,
+                "turns": speaker_turns,
+            },
+        )
+
     transcript_words = get_words_timings_from_raw(transcript_raw)
     transcript_sentences = combine_words_to_sentences( transcript_words, path )  
 

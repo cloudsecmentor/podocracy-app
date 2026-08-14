@@ -272,6 +272,8 @@ def main(path, time2sleep=0):
     stages_list = stages.split("+")
     stages_set = set(stages_list)
     if stages != "all":
+        if parse_legacy_bool(params.get("speaker_recognition", False)) and "transcribe" in stages_set:
+            stages_set.add("combine")
         if stages_set & {"translate", "improve", "voiceover"}:
             stages_set.update({"combine", "timesync"})
         if "improve" in stages_set:

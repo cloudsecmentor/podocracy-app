@@ -147,6 +147,7 @@ def combine_words_to_sentences(word_list, path):
     sentences = []
     current_sentence = ""
     start_time = 0.0
+    current_speaker = None
     max_char_chunk_per_sentence = int(get_params("max_char_chunk_per_sentence", path=path))
     print(f"combine_words_to_sentences: {max_char_chunk_per_sentence = }")
 
@@ -154,6 +155,7 @@ def combine_words_to_sentences(word_list, path):
         word = word_obj["word"]
         if current_sentence == "":
             start_time = word_obj["start"]  # Record the start time of the first word in the sentence
+            current_speaker = word_obj.get("speaker")
         end_time = word_obj["end"]  # Record the current end time of the sentence
 
         # Check if the word is punctuation
@@ -172,13 +174,20 @@ def combine_words_to_sentences(word_list, path):
             "end": end_time,
             "text": current_sentence.strip()
         }
+        if current_speaker is not None:
+            current_sentence_object["speaker"] = current_speaker
+
+        next_speaker = current_speaker
+        if i + 1 < len(word_list):
+            next_speaker = word_list[i + 1].get("speaker")
 
         # Check if the word ends with punctuation
         # Check if the current sentence length has reached the max character chunk limit
         # Check if the time difference to the next word is more than 2 seconds (if there is a next word)
         if word.endswith((".", "!", "?")) or \
            len(current_sentence) >= max_char_chunk_per_sentence or \
-           (i + 1 < len(word_list) and word_list[i + 1]["start"] - end_time > get_params("delay_between_words_for_new_sentence_chunk")):
+           (i + 1 < len(word_list) and word_list[i + 1]["start"] - end_time > get_params("delay_between_words_for_new_sentence_chunk")) or \
+           next_speaker != current_speaker:
 
             sentences.append(current_sentence_object)
             current_sentence = ""  # Reset for the next sentence
@@ -226,18 +235,21 @@ def combine_sentences_to_chunks(sentence_list, path, timing_format):
     current_chunk = ""
     chunk_start = 0.0
     chunk_end = 0.0
+    current_speaker = None
 
     for i, sentence in enumerate(sentence_list):
         print(f"combine_sentences_to_chunks: {i = }, {sentence = }")
         text = sentence["text"]
         sentence_start = sentence["start"]
         sentence_end = sentence["end"]
+        sentence_speaker = sentence.get("speaker")
 
         # Start a new chunk if current is empty
         if current_chunk == "":
             chunk_start = sentence_start
             current_chunk = text + " "
             chunk_end = sentence_end
+            current_speaker = sentence_speaker
         else:
             # Check if adding the next sentence exceeds the max character limit
             # Check if there is a significant time gap before the next sentence
@@ -246,27 +258,35 @@ def combine_sentences_to_chunks(sentence_list, path, timing_format):
             print(f"{sentence_start - chunk_end > get_params('delay_between_words_for_new_sentence_chunk') = }")
             print(f"{i + 1 < len(sentence_list) and sentence_list[i + 1]['start'] - sentence_end > get_params('delay_between_words_for_new_sentence_chunk') = }")
             if len(current_chunk + text) > max_char_chunk or \
-                (sentence_start - chunk_end > get_params("delay_between_words_for_new_sentence_chunk")):
-                chunks.append({
+                (sentence_start - chunk_end > get_params("delay_between_words_for_new_sentence_chunk")) or \
+                sentence_speaker != current_speaker:
+                chunk = {
                     "start": convert_seconds_format(chunk_start, timing_format),
                     "end": convert_seconds_format(chunk_end, timing_format),
                     "text": current_chunk.strip()
-                })
+                }
+                if current_speaker is not None:
+                    chunk["speaker"] = current_speaker
+                chunks.append(chunk)
                 current_chunk = ""
                 current_chunk += text + " "
                 chunk_end = sentence_end
                 chunk_start = sentence_start
+                current_speaker = sentence_speaker
             else:
                 current_chunk += text + " "
                 chunk_end = sentence_end
 
     # Add the last chunk if it's not empty
     if current_chunk:
-        chunks.append({
+        chunk = {
             "start": convert_seconds_format(chunk_start, timing_format),
             "end": convert_seconds_format(chunk_end, timing_format),
             "text": current_chunk.strip()
-        })
+        }
+        if current_speaker is not None:
+            chunk["speaker"] = current_speaker
+        chunks.append(chunk)
 
     return chunks
 
@@ -328,6 +348,8 @@ def naming_convention(path, file_type):
             return f"{path_without_ext}.params.json"
         case "raw":
             return f"{path_without_ext}.raw.json"
+        case "diarization":
+            return f"{path_without_ext}.diarization.json"
         case "whisper-api-transcribe":
             return f"{path_without_ext}.whisperapitranscribe.json"
         case "proofread":

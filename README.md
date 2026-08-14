@@ -71,6 +71,9 @@ Create your `.env` by copying [.env.example](.env.example), then fill in at leas
 
 - `OPENAI_API_KEY` (required) — get one at [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
 - `PORTAL_ADMIN_PASSWORD` (strongly recommended whenever the portal is reachable from other machines)
+- `HF_TOKEN` (optional) — required only for local speaker recognition. Accept the
+  [pyannote Community-1 terms](https://huggingface.co/pyannote/speaker-diarization-community-1)
+  before creating the token.
 
 `.env.example` is the source of truth for supported provider keys (OpenAI, DeepL, ElevenLabs) and common runtime options.
 
@@ -179,6 +182,8 @@ colima start
 | `OPENAI_API_KEY` | empty | Required for OpenAI-backed transcription/TTS/translation paths. |
 | `DEEPL_AUTH_KEY` | empty | Enables DeepL translation provider. |
 | `ELEVENLABS_API_KEY` | empty | Enables ElevenLabs TTS provider. |
+| `HF_TOKEN` | empty | Required when local pyannote speaker recognition is enabled. |
+| `PYANNOTE_MODEL` | `pyannote/speaker-diarization-community-1` | Hugging Face model ID or local pyannote model directory. |
 | `PORTAL_ADMIN_PASSWORD` | empty | Optional HTTP basic auth password for the web portal; set this for any non-local exposure. |
 | `PORTAL_HTTP_PORT` | `8080` | Host port mapped to the portal web container. |
 | `PODOCRACY_ENV_FILE` | `.env` | Env file loaded by API and worker containers. |

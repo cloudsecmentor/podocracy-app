@@ -14,9 +14,14 @@ from typing import Any
 
 import requests
 from pydub import AudioSegment, silence
+from processing_container.speaker_diarization import (
+    DEFAULT_PYANNOTE_MODEL,
+    assign_speakers_to_words,
+    diarize_speakers,
+)
 
 
-WORKER_VERSION = "local-worker-0.3.0"
+WORKER_VERSION = "local-worker-0.4.0"
 DEFAULT_SPEEDUP_VALUE = 1.2
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
 CUSTOM_RECORDING_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".webm"}
@@ -319,6 +324,7 @@ def combine_words_to_sentences_local(words: list[dict[str, Any]], params: dict[s
     current = ""
     start_time = 0.0
     end_time = 0.0
+    current_speaker: str | None = None
 
     for index, word_obj in enumerate(words):
         word = str(word_obj.get("word") or "").strip()
@@ -326,6 +332,7 @@ def combine_words_to_sentences_local(words: list[dict[str, Any]], params: dict[s
             continue
         if not current:
             start_time = float(word_obj["start"])
+            current_speaker = word_obj.get("speaker")
         end_time = float(word_obj.get("end", word_obj["start"]))
 
         if word in {".", "!", "?", ",", ";", ":"}:
@@ -338,15 +345,27 @@ def combine_words_to_sentences_local(words: list[dict[str, Any]], params: dict[s
             current += word + " "
 
         next_pause = 0.0
+        next_speaker = current_speaker
         if index + 1 < len(words):
             next_pause = float(words[index + 1].get("start", end_time)) - end_time
+            next_speaker = words[index + 1].get("speaker")
         sentence = {"start_seconds": start_time, "end_seconds": end_time, "text": current.strip()}
-        if word.endswith((".", "!", "?")) or len(current) >= max_chars or next_pause > pause_sec:
+        if current_speaker is not None:
+            sentence["speaker"] = current_speaker
+        if (
+            word.endswith((".", "!", "?"))
+            or len(current) >= max_chars
+            or next_pause > pause_sec
+            or next_speaker != current_speaker
+        ):
             sentences.append(sentence)
             current = ""
 
     if current:
-        sentences.append({"start_seconds": start_time, "end_seconds": end_time, "text": current.strip()})
+        sentence = {"start_seconds": start_time, "end_seconds": end_time, "text": current.strip()}
+        if current_speaker is not None:
+            sentence["speaker"] = current_speaker
+        sentences.append(sentence)
     return sentences
 
 
@@ -359,6 +378,7 @@ def combine_sentences_to_chunks_local(sentences: list[dict[str, Any]], params: d
     current = ""
     chunk_start = 0.0
     chunk_end = 0.0
+    current_speaker: str | None = None
 
     for sentence in sentences:
         text = str(sentence.get("text") or "").strip()
@@ -366,32 +386,19 @@ def combine_sentences_to_chunks_local(sentences: list[dict[str, Any]], params: d
             continue
         sentence_start = float(sentence["start_seconds"])
         sentence_end = float(sentence["end_seconds"])
+        sentence_speaker = sentence.get("speaker")
         if not current:
             current = text + " "
             chunk_start = sentence_start
             chunk_end = sentence_end
+            current_speaker = sentence_speaker
             continue
-        if len(current + text) > max_chars or sentence_start - chunk_end > pause_sec:
-            chunks.append(
-                {
-                    "id": len(chunks),
-                    "start": seconds_to_timecode(chunk_start, timing_format),
-                    "end": seconds_to_timecode(chunk_end, timing_format),
-                    "start_seconds": chunk_start,
-                    "end_seconds": chunk_end,
-                    "text": current.strip(),
-                }
-            )
-            current = text + " "
-            chunk_start = sentence_start
-            chunk_end = sentence_end
-        else:
-            current += text + " "
-            chunk_end = sentence_end
-
-    if current:
-        chunks.append(
-            {
+        if (
+            len(current + text) > max_chars
+            or sentence_start - chunk_end > pause_sec
+            or sentence_speaker != current_speaker
+        ):
+            chunk = {
                 "id": len(chunks),
                 "start": seconds_to_timecode(chunk_start, timing_format),
                 "end": seconds_to_timecode(chunk_end, timing_format),
@@ -399,7 +406,29 @@ def combine_sentences_to_chunks_local(sentences: list[dict[str, Any]], params: d
                 "end_seconds": chunk_end,
                 "text": current.strip(),
             }
-        )
+            if current_speaker is not None:
+                chunk["speaker"] = current_speaker
+            chunks.append(chunk)
+            current = text + " "
+            chunk_start = sentence_start
+            chunk_end = sentence_end
+            current_speaker = sentence_speaker
+        else:
+            current += text + " "
+            chunk_end = sentence_end
+
+    if current:
+        chunk = {
+            "id": len(chunks),
+            "start": seconds_to_timecode(chunk_start, timing_format),
+            "end": seconds_to_timecode(chunk_end, timing_format),
+            "start_seconds": chunk_start,
+            "end_seconds": chunk_end,
+            "text": current.strip(),
+        }
+        if current_speaker is not None:
+            chunk["speaker"] = current_speaker
+        chunks.append(chunk)
     return chunks
 
 
@@ -461,12 +490,27 @@ def transcribe(source_mp3: Path, params: dict[str, Any], project: Path, logger: 
         logger.info("Transcribed chunk %s/%s with %s words", index + 1, len(ranges), len(words))
 
     all_words.sort(key=lambda item: (float(item.get("start", 0.0)), float(item.get("end", 0.0))))
+    speaker_turns: list[dict[str, Any]] = []
+    if parse_legacy_bool(params.get("speaker_recognition", False)):
+        number_of_speakers = max(1, min(20, param_int(params, "number_of_speakers", 2)))
+        speaker_turns = diarize_speakers(source_mp3, number_of_speakers, logger)
+        all_words = assign_speakers_to_words(all_words, speaker_turns)
+        write_json(
+            project / "work" / "source.diarization.json",
+            {
+                "model": os.getenv("PYANNOTE_MODEL", DEFAULT_PYANNOTE_MODEL),
+                "number_of_speakers": number_of_speakers,
+                "turns": speaker_turns,
+            },
+        )
     raw = {
         "text": " ".join(part for part in text_parts if part).strip(),
         "segments": [{"words": all_words}],
         "raw_segments": all_segments,
         "chunks": raw_chunks,
     }
+    if speaker_turns:
+        raw["speaker_diarization"] = speaker_turns
     write_json(project / "work" / "source.raw.json", raw)
 
     if all_words:

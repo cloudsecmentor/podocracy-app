@@ -52,6 +52,8 @@ class BemaDraftWorkflowTests(unittest.TestCase):
                 use_subtitles_as_is="",
                 autogenerate_custom_instructions="",
                 detailed_transcription="true",
+                speaker_recognition="true",
+                number_of_speakers="2",
                 whisper_chunk_length_sec="300",
                 whisper_silence_split="",
                 whisper_silence_sec="2",
@@ -85,6 +87,8 @@ class BemaDraftWorkflowTests(unittest.TestCase):
         self.assertEqual(params["stages_to_run"], "translate+improve")
         self.assertEqual(params["custom_instructions"], "Keep names unchanged.")
         self.assertEqual(params["bema_episode"], 34)
+        self.assertTrue(params["speaker_recognition"])
+        self.assertEqual(params["number_of_speakers"], 2)
 
         with self.assertRaisesRegex(api.HTTPException, "Only draft projects can be started"):
             self.start_project(draft["id"])

@@ -200,12 +200,14 @@ function Write-EnvFile($home, $key) {
 OPENAI_API_KEY=$key
 DEEPL_AUTH_KEY=
 ELEVENLABS_API_KEY=
+HF_TOKEN=
 
 PORTAL_HTTP_PORT=$Port
 PORTAL_ADMIN_PASSWORD=
 WORKER_POLL_SECONDS=3
 
 OPENAI_TRANSCRIBE_MODEL=whisper-1
+PYANNOTE_MODEL=pyannote/speaker-diarization-community-1
 OPENAI_TTS_MODEL=gpt-4o-mini-tts
 OPENAI_TTS_VOICE=alloy
 "@

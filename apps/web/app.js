@@ -22,6 +22,8 @@ const bemaImportButton = document.querySelector("#import-bema");
 const stageSelectAllButton = document.querySelector("#stages-select-all");
 const stageDeselectAllButton = document.querySelector("#stages-deselect-all");
 const stageCheckboxes = Array.from(document.querySelectorAll('input[name="stage"]'));
+const speakerRecognitionCheckbox = form.querySelector('input[name="speaker_recognition"]');
+const numberOfSpeakersInput = form.querySelector('input[name="number_of_speakers"]');
 
 const PROVIDER_LABELS = {
   openai: "OpenAI",
@@ -97,6 +99,10 @@ function setAllStages(checked) {
   stageCheckboxes.forEach((checkbox) => {
     checkbox.checked = checked;
   });
+}
+
+function syncSpeakerRecognitionFields() {
+  numberOfSpeakersInput.disabled = !speakerRecognitionCheckbox.checked;
 }
 
 function setDraftMode(project, scrollToForm = false) {
@@ -506,6 +512,7 @@ form.addEventListener("submit", async (event) => {
     selectedProject = project.id;
     currentDetailSig = null;
     form.reset();
+    syncSpeakerRecognitionFields();
     const startedDraft = Boolean(draftProjectId);
     clearDraftMode();
     setFormMessage(startedDraft ? "Imported project configured and queued." : "Project created and queued.", "ok");
@@ -521,6 +528,7 @@ form.addEventListener("submit", async (event) => {
 document.querySelector("#refresh").addEventListener("click", loadProjects);
 stageSelectAllButton.addEventListener("click", () => setAllStages(true));
 stageDeselectAllButton.addEventListener("click", () => setAllStages(false));
+speakerRecognitionCheckbox.addEventListener("change", syncSpeakerRecognitionFields);
 bemaImportButton.addEventListener("click", () => {
   void importBemaEpisode();
 });
@@ -529,5 +537,6 @@ cancelDraftButton.addEventListener("click", () => {
   setFormMessage("");
 });
 
+syncSpeakerRecognitionFields();
 loadProjects();
 refreshTimer = setInterval(loadProjects, 5000);

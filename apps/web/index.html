@@ -101,6 +101,20 @@
             <summary>Advanced settings <span class="muted">&mdash; timing, chunking, extra files</span></summary>
             <div class="advanced-body">
               <div class="grid">
+                <label class="check">
+                  <input type="checkbox" name="speaker_recognition">
+                  <span>
+                    Recognize speakers
+                    <span class="muted">Runs local pyannote; first use requires HF_TOKEN and downloads Community-1</span>
+                  </span>
+                </label>
+
+                <label>
+                  Number of speakers
+                  <input type="number" name="number_of_speakers" min="1" max="20" step="1" value="2" disabled>
+                  <span class="muted">Used when speaker recognition is enabled</span>
+                </label>
+
                 <label>
                   Voiceover speed
                   <input type="number" name="voiceover_tempo" min="0.5" max="2" step="0.05" value="1.2">

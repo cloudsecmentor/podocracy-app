@@ -67,6 +67,14 @@
         "value": true,
         "description": "Use whisper API. If false, use whisper locally."
     },
+    "speaker_recognition": {
+        "value": false,
+        "description": "Run local pyannote diarization and assign speaker labels to transcript words."
+    },
+    "number_of_speakers": {
+        "value": 2,
+        "description": "Expected number of speakers for pyannote diarization."
+    },
     "whisper_default_model_local": {
         "value": "small",
         "description": "The model which will be used for whisper locally if not provided by the user."

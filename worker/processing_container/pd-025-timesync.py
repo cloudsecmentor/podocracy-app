@@ -368,6 +368,12 @@ def main(path):
         logging.error(f"Can't get transcript raw: [{e}]")
         exit(1)
 
+    if parse_legacy_bool(get_params("speaker_recognition", path=path)):
+        logging.info(
+            "Speaker recognition is enabled; preserving the pyannote speaker-aware combined transcript"
+        )
+        return
+
 
     transript_text = ""
     for text_path, label in ((path_proofread, "proofread"), (path_transcript, "transcript")):

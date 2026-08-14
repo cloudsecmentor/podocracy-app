@@ -25,6 +25,7 @@ PROJECTS_DIR = Path(os.getenv("PROJECTS_DIR", "/data/projects"))
 PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
 DOWNLOADABLE_WORK_FILES = {
     "source.raw.json",
+    "source.diarization.json",
     "source.combined.json",
     "source.translated.json",
     "source.improved.json",
@@ -49,6 +50,7 @@ DEFAULT_VOICEOVER_SHIFT = 1.5
 DEFAULT_MAX_PREVIEW_SIZE_MB = 2.0
 DEFAULT_WHISPER_CHUNK_LENGTH_SEC = 300
 DEFAULT_WHISPER_SILENCE_SEC = 2.0
+DEFAULT_NUMBER_OF_SPEAKERS = 2
 DEFAULT_MAX_CHAR_CHUNK_PER_SENTENCE = 200
 DEFAULT_MAX_CHAR_CHUNK = 400
 DEFAULT_IMPROVE_MAX_CHUNK_CHARS = 12000
@@ -199,6 +201,21 @@ def parse_optional_float(value: str, field_name: str, minimum: float | None = No
     return parsed
 
 
+def parse_int(value: str, field_name: str, default: int, minimum: int | None = None, maximum: int | None = None) -> int:
+    text = (value or "").strip()
+    if not text:
+        return default
+    try:
+        parsed = int(text)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"{field_name} must be a whole number") from exc
+    if minimum is not None and parsed < minimum:
+        raise HTTPException(status_code=400, detail=f"{field_name} must be at least {minimum}")
+    if maximum is not None and parsed > maximum:
+        raise HTTPException(status_code=400, detail=f"{field_name} must be at most {maximum}")
+    return parsed
+
+
 def parse_optional_bool(value: str) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -328,6 +345,8 @@ def build_project_payload(
     use_subtitles_as_is: bool = False,
     autogenerate_custom_instructions: bool = False,
     detailed_transcription: bool = True,
+    speaker_recognition: bool = False,
+    number_of_speakers: int = DEFAULT_NUMBER_OF_SPEAKERS,
     whisper_chunk_length_sec: int = DEFAULT_WHISPER_CHUNK_LENGTH_SEC,
     whisper_silence_split: bool = False,
     whisper_silence_sec: float = DEFAULT_WHISPER_SILENCE_SEC,
@@ -361,6 +380,8 @@ def build_project_payload(
         "use_subtitles_as_is": use_subtitles_as_is,
         "autogenerate_custom_instructions": autogenerate_custom_instructions,
         "detailed_transcription": detailed_transcription,
+        "speaker_recognition": speaker_recognition,
+        "number_of_speakers": number_of_speakers,
         "whisper_chunk_length_sec": whisper_chunk_length_sec,
         "whisper_silence_split": whisper_silence_split,
         "whisper_silence_sec": whisper_silence_sec,
@@ -400,6 +421,8 @@ def build_project_payload(
         "normalize_final_audio": normalize_final_audio,
         "autogenerate_custom_instructions": autogenerate_custom_instructions,
         "detailed_transcription": detailed_transcription,
+        "speaker_recognition": speaker_recognition,
+        "number_of_speakers": number_of_speakers,
     }
     return params, metadata
 
@@ -422,6 +445,8 @@ def build_configured_project_payload(
     use_subtitles_as_is: str,
     autogenerate_custom_instructions: str,
     detailed_transcription: str,
+    speaker_recognition: str,
+    number_of_speakers: str,
     whisper_chunk_length_sec: str,
     whisper_silence_split: str,
     whisper_silence_sec: str,
@@ -452,6 +477,13 @@ def build_configured_project_payload(
     parsed_max_char_chunk_per_sentence = parse_optional_float(max_char_chunk_per_sentence, "max_char_chunk_per_sentence", 20.0, 5000.0)
     parsed_max_char_chunk = parse_optional_float(max_char_chunk, "max_char_chunk", 50.0, 20000.0)
     parsed_improve_max_chunk_chars = parse_optional_float(improve_max_chunk_chars, "improve_max_chunk_chars", 500.0, 200000.0)
+    parsed_number_of_speakers = parse_int(
+        number_of_speakers,
+        "number_of_speakers",
+        DEFAULT_NUMBER_OF_SPEAKERS,
+        1,
+        20,
+    )
 
     return build_project_payload(
         filename=filename,
@@ -470,6 +502,8 @@ def build_configured_project_payload(
         use_subtitles_as_is=parse_optional_bool(use_subtitles_as_is),
         autogenerate_custom_instructions=parse_optional_bool(autogenerate_custom_instructions),
         detailed_transcription=parse_bool(detailed_transcription, default=True),
+        speaker_recognition=parse_optional_bool(speaker_recognition),
+        number_of_speakers=parsed_number_of_speakers,
         whisper_chunk_length_sec=int(parsed_whisper_chunk_length_sec or DEFAULT_WHISPER_CHUNK_LENGTH_SEC),
         whisper_silence_split=parse_optional_bool(whisper_silence_split),
         whisper_silence_sec=parsed_whisper_silence_sec if parsed_whisper_silence_sec is not None else DEFAULT_WHISPER_SILENCE_SEC,
@@ -526,6 +560,8 @@ def create_project(
     use_subtitles_as_is: str = Form(""),
     autogenerate_custom_instructions: str = Form(""),
     detailed_transcription: str = Form("true"),
+    speaker_recognition: str = Form(""),
+    number_of_speakers: str = Form(str(DEFAULT_NUMBER_OF_SPEAKERS)),
     whisper_chunk_length_sec: str = Form(str(DEFAULT_WHISPER_CHUNK_LENGTH_SEC)),
     whisper_silence_split: str = Form(""),
     whisper_silence_sec: str = Form(str(DEFAULT_WHISPER_SILENCE_SEC)),
@@ -565,6 +601,8 @@ def create_project(
         use_subtitles_as_is=use_subtitles_as_is,
         autogenerate_custom_instructions=autogenerate_custom_instructions,
         detailed_transcription=detailed_transcription,
+        speaker_recognition=speaker_recognition,
+        number_of_speakers=number_of_speakers,
         whisper_chunk_length_sec=whisper_chunk_length_sec,
         whisper_silence_split=whisper_silence_split,
         whisper_silence_sec=whisper_silence_sec,
@@ -691,6 +729,8 @@ def start_draft_project(
     use_subtitles_as_is: str = Form(""),
     autogenerate_custom_instructions: str = Form(""),
     detailed_transcription: str = Form("true"),
+    speaker_recognition: str = Form(""),
+    number_of_speakers: str = Form(str(DEFAULT_NUMBER_OF_SPEAKERS)),
     whisper_chunk_length_sec: str = Form(str(DEFAULT_WHISPER_CHUNK_LENGTH_SEC)),
     whisper_silence_split: str = Form(""),
     whisper_silence_sec: str = Form(str(DEFAULT_WHISPER_SILENCE_SEC)),
@@ -732,6 +772,8 @@ def start_draft_project(
         use_subtitles_as_is=use_subtitles_as_is,
         autogenerate_custom_instructions=autogenerate_custom_instructions,
         detailed_transcription=detailed_transcription,
+        speaker_recognition=speaker_recognition,
+        number_of_speakers=number_of_speakers,
         whisper_chunk_length_sec=whisper_chunk_length_sec,
         whisper_silence_split=whisper_silence_split,
         whisper_silence_sec=whisper_silence_sec,

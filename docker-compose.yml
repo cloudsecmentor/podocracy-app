@@ -39,6 +39,10 @@ services:
       - type: bind
         source: ${PODOCRACY_PROJECTS_DIR:-./data/projects}
         target: /data/projects
+      - pyannote-cache:/root/.cache/huggingface
     depends_on:
       - app-api
     restart: unless-stopped
+
+volumes:
+  pyannote-cache:
