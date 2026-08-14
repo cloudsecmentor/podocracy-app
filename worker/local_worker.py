@@ -662,13 +662,14 @@ def translate_segments(
     logger: logging.Logger,
 ) -> list[dict[str, Any]]:
     language = normalize_language(target_language)
-    auth_key = os.getenv("DEEPL_AUTH_KEY")
     translation_key = str(params.get("translation_text_key") or "translated_text")
     improved_key = str(params.get("improved_text_key") or "voiceover_text")
     translated = []
+    translation_provider = str(params.get("translation_provider") or "openai").strip().lower()
+    auth_key = os.getenv("DEEPL_AUTH_KEY")
 
     translator = None
-    if auth_key:
+    if translation_provider == "deepl" and auth_key:
         import deepl
 
         translator = deepl.Translator(auth_key)
@@ -1288,7 +1289,7 @@ def process_project(project: Path) -> None:
         "created_at": now_iso(),
         "provider_selection": {
             "transcription": "openai",
-            "translation": "deepl" if os.getenv("DEEPL_AUTH_KEY") else "openai",
+            "translation": "openai",
             "tts": "openai",
         },
         "stages": [],
