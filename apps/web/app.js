@@ -114,7 +114,15 @@ function setDraftMode(project, scrollToForm = false) {
   });
   submitProjectButton.textContent = "Start processing";
   cancelDraftButton.hidden = false;
-  setFormMessage("Audio and transcript imported. Set the options below, then start processing.", "ok");
+  const transcriptWarning = project.metadata?.transcript_warning;
+  if (transcriptWarning) {
+    setFormMessage(
+      `${transcriptWarning}. Audio was still imported — set the options below, then start processing.`,
+      "warning",
+    );
+  } else {
+    setFormMessage("Audio and transcript imported. Set the options below, then start processing.", "ok");
+  }
   if (scrollToForm) {
     formTitle.scrollIntoView({ behavior: "smooth", block: "start" });
   }

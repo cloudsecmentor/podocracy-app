@@ -93,16 +93,24 @@ class BemaDraftWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(api.HTTPException, "Only draft projects can be started"):
             self.start_project(draft["id"])
 
-    def test_requested_missing_transcript_does_not_create_project(self) -> None:
+    def test_missing_transcript_still_creates_audio_draft(self) -> None:
         with patch.object(
             api,
             "download_bema_episode",
             return_value=("e034.mp3", b"audio", ""),
         ):
-            with self.assertRaisesRegex(api.HTTPException, "transcript could not be downloaded"):
-                api.import_bema_episode(api.ImportBemaEpisodeRequest(episode=34))
+            project = api.import_bema_episode(api.ImportBemaEpisodeRequest(episode=34))
 
-        self.assertEqual(list(api.PROJECTS_DIR.iterdir()), [])
+        root = api.PROJECTS_DIR / project["id"]
+        self.assertEqual(project["status"]["state"], "draft")
+        self.assertEqual((root / "input" / "e034.mp3").read_bytes(), b"audio")
+        self.assertFalse((root / "input" / "e034.proofread.txt").exists())
+        self.assertFalse(project["metadata"]["transcript_uploaded"])
+        self.assertEqual(
+            project["metadata"]["transcript_warning"],
+            "BEMA episode transcript could not be downloaded",
+        )
+        self.assertIn("without transcript", project["status"]["message"])
 
 
 if __name__ == "__main__":

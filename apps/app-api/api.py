@@ -671,17 +671,25 @@ def import_bema_episode(body: ImportBemaEpisodeRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="episode must be between 1 and 9999")
 
     mp3_filename, mp3_content, transcript_text = download_bema_episode(body.episode)
-    if body.include_transcript and not transcript_text:
-        raise HTTPException(status_code=404, detail="BEMA episode transcript could not be downloaded")
     project_dirs = create_project_root()
     source_path = project_dirs.input_dir / mp3_filename
     source_path.write_bytes(mp3_content)
 
     transcript_filename = ""
+    transcript_warning = None
     if body.include_transcript and transcript_text:
         transcript_filename = f"{source_path.stem}.proofread.txt"
         transcript_path = project_dirs.input_dir / transcript_filename
         transcript_path.write_text(transcript_text, encoding="utf-8")
+    elif body.include_transcript:
+        transcript_warning = "BEMA episode transcript could not be downloaded"
+
+    if transcript_filename:
+        status_message = "Audio and transcript imported. Configure the project to start processing."
+    elif transcript_warning:
+        status_message = "Audio imported without transcript. Configure the project to start processing."
+    else:
+        status_message = "Audio imported. Configure the project to start processing."
 
     metadata = {
         "id": project_dirs.project_id,
@@ -692,6 +700,7 @@ def import_bema_episode(body: ImportBemaEpisodeRequest) -> dict[str, Any]:
         "bema_url": f"https://www.bemadiscipleship.com/{body.episode}",
         "transcript_filename": transcript_filename or None,
         "transcript_uploaded": bool(transcript_filename),
+        "transcript_warning": transcript_warning,
     }
     write_json(project_dirs.root / "metadata.json", metadata)
     write_json(project_dirs.root / "status.json", {
@@ -699,7 +708,7 @@ def import_bema_episode(body: ImportBemaEpisodeRequest) -> dict[str, Any]:
         "state": "draft",
         "stage": "configuration",
         "progress": 0,
-        "message": "Audio and transcript imported. Configure the project to start processing.",
+        "message": status_message,
         "updated_at": now_iso(),
     })
     write_json(

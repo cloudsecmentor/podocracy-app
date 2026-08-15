@@ -465,6 +465,12 @@ a:focus-visible {
   border-color: color-mix(in srgb, var(--danger) 25%, transparent);
 }
 
+.message.warning {
+  color: var(--warn);
+  background: var(--warn-tint);
+  border-color: color-mix(in srgb, var(--warn) 25%, transparent);
+}
+
 /* ---------- Projects list ---------- */
 
 .projects {
