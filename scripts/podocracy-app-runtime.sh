@@ -25,6 +25,9 @@ fi
 
 # Explicit overrides (power users / tests). Empty means "not set by the user".
 PODOCRACY_HOME_ENV="${PODOCRACY_HOME:-}"
+# Finder-launched apps inherit a minimal PATH that omits Docker Desktop's CLI.
+export PATH="/usr/local/bin:/opt/homebrew/bin:/Applications/Docker.app/Contents/Resources/bin:${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
+
 PODOCRACY_PROJECTS_DIR_ENV="${PODOCRACY_PROJECTS_DIR:-}"
 PORTAL_HTTP_PORT_ENV="${PORTAL_HTTP_PORT:-}"
 
