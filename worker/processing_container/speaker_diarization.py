@@ -2,12 +2,35 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
+import tempfile
 from bisect import bisect_right
 from pathlib import Path
 from typing import Any
 
 
 DEFAULT_PYANNOTE_MODEL = "pyannote/speaker-diarization-community-1"
+PYANNOTE_SAMPLE_RATE = 16000
+
+
+def decode_to_wav(audio_path: Path, destination: Path) -> Path:
+    # Pyannote sizes its sliding window from the container header duration, which for MP3
+    # overshoots the decodable samples by up to one frame. The final window then comes back
+    # short and Audio.crop raises. PCM WAV reports an exact sample count, so it cannot drift.
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel", "quiet",
+        "-i", str(audio_path),
+        "-vn",
+        "-ac", "1",
+        "-ar", str(PYANNOTE_SAMPLE_RATE),
+        "-c:a", "pcm_s16le",
+        "-y",
+        str(destination),
+    ]
+    subprocess.run(command, check=True)
+    return destination
 
 
 def diarize_speakers(
@@ -40,7 +63,12 @@ def diarize_speakers(
     if pipeline is None:
         raise RuntimeError(f"Could not load pyannote model: {model_source}")
 
-    output = pipeline(str(audio_path), num_speakers=number_of_speakers)
+    with tempfile.TemporaryDirectory(prefix="pyannote-") as workdir:
+        wav_path = Path(workdir) / f"{Path(audio_path).stem}.diarization.wav"
+        active_logger.info("Decoding %s to %s Hz mono wav for diarization", audio_path, PYANNOTE_SAMPLE_RATE)
+        decode_to_wav(Path(audio_path), wav_path)
+        output = pipeline(str(wav_path), num_speakers=number_of_speakers)
+
     annotation = output.exclusive_speaker_diarization
     turns = [
         {

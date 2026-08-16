@@ -6,6 +6,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 PORTAL_PIPELINE_STAGES = frozenset({"transcribe", "translate", "customize", "improve", "voiceover"})
+# Every other stage feeds artifacts to the stages after it, so its failure strands the rest of the run.
+NON_BLOCKING_STAGES = frozenset({"postprocess"})
+
+
+def stage_blocks_pipeline(stage: str) -> bool:
+    return stage not in NON_BLOCKING_STAGES
 
 
 def now_iso() -> str:
@@ -75,7 +81,10 @@ def append_portal_stage(
     ended_at: str,
     detail: str = "",
 ) -> None:
-    if not portal_enabled() or name not in PORTAL_PIPELINE_STAGES:
+    if not portal_enabled():
+        return
+    # Helper stages stay out of the manifest unless they broke, so the portal can name the real culprit.
+    if name not in PORTAL_PIPELINE_STAGES and stage_status != "failed":
         return
     project_dir = portal_project_dir(source_path)
     if project_dir is None:
@@ -105,4 +114,8 @@ def requested_stages(stages_to_run: str) -> set[str]:
 
 def fatal_stage_failures(stage_failures: list[str], stages_to_run: str) -> list[str]:
     requested = requested_stages(stages_to_run)
-    return [stage for stage in stage_failures if stage in requested]
+    return [
+        stage
+        for stage in stage_failures
+        if stage in requested or stage_blocks_pipeline(stage)
+    ]

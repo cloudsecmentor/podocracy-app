@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -54,8 +55,6 @@ def ensure_orchestrator_layout() -> None:
     try:
         ORCHESTRATOR_LAYOUT_DIR.symlink_to(PROCESSING_DIR, target_is_directory=True)
     except OSError:
-        import shutil
-
         shutil.copytree(PROCESSING_DIR, ORCHESTRATOR_LAYOUT_DIR)
 
 
@@ -79,9 +78,14 @@ def project_source_path(project: Path) -> Path:
 def process_project(project: Path) -> None:
     ensure_orchestrator_layout()
     source_path = project_source_path(project)
+    # config/params.json is the source of truth; the pipeline only ever reads the input-dir copy,
+    # which stages such as customize rewrite mid-run, so refresh it from config before each run.
     params_path = source_path.with_suffix(".params.json")
-    if not params_path.exists():
-        raise FileNotFoundError(f"Params file is missing: {params_path}")
+    config_params_path = project / "config" / "params.json"
+    if config_params_path.exists():
+        shutil.copyfile(config_params_path, params_path)
+    elif not params_path.exists():
+        raise FileNotFoundError(f"Params file is missing: {config_params_path}")
 
     logs_dir = project / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)

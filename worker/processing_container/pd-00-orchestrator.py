@@ -101,6 +101,7 @@ from portal_status import (
     append_portal_stage,
     fatal_stage_failures,
     now_iso as portal_now_iso,
+    stage_blocks_pipeline,
     update_portal_status,
 )
 
@@ -316,6 +317,7 @@ def main(path, time2sleep=0):
 
         logging.info(f"Running stage [{stage}]: {script} with args: {args}, timestamp: [{get_timestamp()}]")
         stage_started_at = portal_now_iso()
+        stage_failed = False
         try:
             log_dir = f"{get_local_processing_directory()}/.log"
             os.makedirs(log_dir, exist_ok=True)
@@ -333,6 +335,7 @@ def main(path, time2sleep=0):
 
             if result.returncode != 0:
                 stage_failures.append(stage)
+                stage_failed = True
                 tail = (result.stdout or "")[-2000:]
                 append_portal_stage(
                     path,
@@ -358,6 +361,7 @@ def main(path, time2sleep=0):
 
         except Exception as e:
             stage_failures.append(stage)
+            stage_failed = True
             append_portal_stage(
                 path,
                 stage,
@@ -367,6 +371,14 @@ def main(path, time2sleep=0):
                 str(e),
             )
             logging.error(f"Failed to run stage [{stage}]: {script} with args: {args}, error: {e}")
+
+        if stage_failed and stage_blocks_pipeline(stage):
+            remaining = [name for name, _, _ in runnable_scripts[runnable_index:]]
+            logging.error(
+                f"Aborting pipeline after stage [{stage}] failed; "
+                f"remaining stages depend on its output and were not run: {remaining}"
+            )
+            break
 
     fatal_failures = fatal_stage_failures(stage_failures, stages_to_run_param)
     if stage_failures:

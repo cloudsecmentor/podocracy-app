@@ -763,6 +763,42 @@ a:focus-visible {
   align-items: center;
 }
 
+.instructions textarea {
+  min-height: 120px;
+}
+
+.instructions h4 {
+  margin: 6px 0 0;
+  font-size: 14px;
+}
+
+.instructions-label {
+  display: grid;
+  gap: 6px;
+}
+
+.instructions-generated,
+.instructions-used pre {
+  max-height: 260px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--ink);
+  color: #f2efe6;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.instructions-used summary {
+  cursor: pointer;
+  color: var(--mute);
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+
 .editor-head {
   display: flex;
   justify-content: space-between;
