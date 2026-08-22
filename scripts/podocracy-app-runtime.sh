@@ -324,6 +324,18 @@ OPENAI_TRANSCRIBE_MODEL=whisper-1
 PYANNOTE_MODEL=pyannote/speaker-diarization-community-1
 OPENAI_TTS_MODEL=gpt-4o-mini-tts
 OPENAI_TTS_VOICE=alloy
+
+# Local VibeVoice TTS server. Needed only for tts_api=vibevoice; see docs/local-tts-vibevoice.md.
+# host.docker.internal is used because the worker runs in a container, where 127.0.0.1
+# is the container itself. Running the worker outside Docker? Use http://127.0.0.1:8000/v1.
+# Uncomment to enable; setting VIBEVOICE_BASE_URL is what marks the provider available.
+# VIBEVOICE_BASE_URL=http://host.docker.internal:8000/v1
+# VIBEVOICE_API_KEY=
+# VIBEVOICE_TTS_MODEL=7B
+# VIBEVOICE_TTS_VOICE=SEBBE
+# VIBEVOICE_TIMEOUT_SECONDS=900
+# VIBEVOICE_CFG_SCALE=
+# VIBEVOICE_SPEED=1.0
 ENV
   chmod 600 "$PODOCRACY_HOME/.env" 2>/dev/null || true
 }

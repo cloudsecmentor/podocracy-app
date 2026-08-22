@@ -64,15 +64,32 @@
             </label>
 
             <label>
+              Voiceover engine
+              <select name="tts_api" id="tts-engine">
+                <option value="openai" selected>OpenAI</option>
+                <option value="elevenlabs">ElevenLabs</option>
+                <option value="vibevoice">VibeVoice (local)</option>
+              </select>
+              <span class="muted" id="tts-engine-hint"></span>
+            </label>
+
+            <label>
               Narrator voice
-              <select name="voice">
+              <select name="voice" id="voice-select">
                 <option value="alloy" selected>Alloy</option>
                 <option value="verse">Verse</option>
                 <option value="coral">Coral</option>
                 <option value="sage">Sage</option>
               </select>
+              <input type="text" name="voice" id="voice-input" placeholder="Voice id from your VibeVoice server" hidden disabled>
+              <span class="muted" id="voice-hint" hidden></span>
             </label>
           </div>
+
+          <p id="tts-notice" class="notice" role="status" aria-live="polite" hidden>
+            <span id="tts-notice-text"></span>
+            <button type="button" class="notice-dismiss" id="tts-notice-dismiss" aria-label="Dismiss">&times;</button>
+          </p>
 
           <div class="stage-picker">
             <div class="stage-picker-header">

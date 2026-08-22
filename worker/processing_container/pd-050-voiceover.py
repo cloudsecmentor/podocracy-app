@@ -42,10 +42,14 @@ def get_voice_name(path):
     before_sleep=before_sleep_log(logging, logging.INFO)
 )
 def generate_openai_tts(path, text, speech_file_path, voice):
-    if get_params("tts_api") == "elevenlabs":
+    tts_api = str(get_params("tts_api") or "openai").lower()
+    if tts_api == "elevenlabs":
         logging.info(f"Using ElevenLabs TTS API for {speech_file_path}")
         return tts_elevenlabs(text, speech_file_path)
-    
+    if tts_api == "vibevoice":
+        logging.info(f"Using local VibeVoice TTS server for {speech_file_path}")
+        return tts_vibevoice(text, speech_file_path, voice)
+
     from openai import OpenAI
     import os
     import dotenv
@@ -62,6 +66,60 @@ def generate_openai_tts(path, text, speech_file_path, voice):
     ) as response:
         response.stream_to_file(speech_file_path)
 
+    return None
+
+
+def tts_vibevoice(text: str, speech_file_path: str, voice: str) -> None:
+    """Local, OpenAI-compatible TTS server. This legacy path writes .ogg, so ask the
+    server for ogg rather than the mp3 the portal worker requests."""
+    import os
+
+    import requests
+
+    base_url = (os.getenv("VIBEVOICE_BASE_URL") or "").strip().rstrip("/")
+    if not base_url:
+        raise ValueError("VIBEVOICE_BASE_URL is not set")
+    if base_url.split(":", 1)[0].lower() not in ("http", "https"):
+        raise ValueError("VIBEVOICE_BASE_URL must use http or https")
+
+    headers = {"Content-Type": "application/json", "Accept": "audio/ogg"}
+    api_key = (os.getenv("VIBEVOICE_API_KEY") or "").strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    def param(name):
+        # get_params raises on an older parameters.json that predates these keys.
+        try:
+            return get_params(name)
+        except Exception:
+            return ""
+
+    payload = {
+        "input": text,
+        "voice": voice or os.getenv("VIBEVOICE_TTS_VOICE") or "SEBBE",
+        "model": param("vibevoice_model") or os.getenv("VIBEVOICE_TTS_MODEL") or "7B",
+        "response_format": "ogg",
+    }
+    for key, env_name in (("speed", "VIBEVOICE_SPEED"), ("cfg_scale", "VIBEVOICE_CFG_SCALE")):
+        raw = str(param(f"vibevoice_{key}") or os.getenv(env_name) or "").strip()
+        if raw:
+            payload[key] = float(raw)
+
+    timeout = float((os.getenv("VIBEVOICE_TIMEOUT_SECONDS") or "900").strip() or 900)
+    response = requests.post(
+        f"{base_url}/audio/speech",
+        headers=headers,
+        json=payload,
+        timeout=(10, timeout),
+    )
+    if not response.ok:
+        detail = " ".join(response.text.split())[:400]
+        raise ValueError(f"VibeVoice TTS failed with HTTP {response.status_code}: {detail}")
+    if not response.content:
+        raise ValueError("VibeVoice TTS returned an empty audio response")
+
+    with open(speech_file_path, "wb") as handle:
+        handle.write(response.content)
     return None
 
 

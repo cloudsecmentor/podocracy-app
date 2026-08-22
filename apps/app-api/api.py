@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from html import unescape
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -54,6 +54,8 @@ DEFAULT_NUMBER_OF_SPEAKERS = 2
 DEFAULT_MAX_CHAR_CHUNK_PER_SENTENCE = 200
 DEFAULT_MAX_CHAR_CHUNK = 400
 DEFAULT_IMPROVE_MAX_CHUNK_CHARS = 12000
+VIBEVOICE_DEFAULT_VOICE = "SEBBE"
+VIBEVOICE_VOICES_TIMEOUT_SECONDS = 5.0
 
 app = FastAPI(title="Podocracy Worker Portal API")
 app.add_middleware(
@@ -246,10 +248,16 @@ def parse_bool(value: str, default: bool = False) -> bool:
     raise HTTPException(status_code=400, detail="Boolean fields must be true or false")
 
 
+def optional_form_text(value: Any) -> str:
+    # These endpoints are also called directly (tests, scripts), where an unpassed
+    # optional argument is still the Form(...) default object rather than a string.
+    return value.strip() if isinstance(value, str) else ""
+
+
 def parse_tts_api(value: str) -> str:
     tts_api = (value or "openai").strip().lower()
-    if tts_api not in {"openai", "elevenlabs"}:
-        raise HTTPException(status_code=400, detail="tts_api must be openai or elevenlabs")
+    if tts_api not in {"openai", "elevenlabs", "vibevoice"}:
+        raise HTTPException(status_code=400, detail="tts_api must be openai, elevenlabs, or vibevoice")
     return tts_api
 
 
@@ -355,6 +363,9 @@ def build_project_payload(
     tts_api: str,
     translation_provider: str = "openai",
     elevenlabs_voice_id: str = "",
+    vibevoice_model: str = "",
+    vibevoice_cfg_scale: str = "",
+    vibevoice_speed: str = "",
     voiceover_tempo: float | None = None,
     voiceover_shift: float | None = None,
     normalize_final_audio: bool = False,
@@ -414,6 +425,14 @@ def build_project_payload(
         params["voiceover_shift"] = voiceover_shift
     if elevenlabs_voice_id.strip():
         params["elevenlabs_voice_id"] = elevenlabs_voice_id.strip()
+    for key, raw in (
+        ("vibevoice_model", vibevoice_model),
+        ("vibevoice_cfg_scale", vibevoice_cfg_scale),
+        ("vibevoice_speed", vibevoice_speed),
+    ):
+        cleaned = optional_form_text(raw)
+        if cleaned:
+            params[key] = cleaned
     if subtitle_relative:
         params["custom_subtitles"] = "true"
         params["custom_subtitles_path"] = subtitle_relative
@@ -455,6 +474,9 @@ def build_configured_project_payload(
     tts_api: str,
     translation_provider: str,
     elevenlabs_voice_id: str,
+    vibevoice_model: str = "",
+    vibevoice_cfg_scale: str = "",
+    vibevoice_speed: str = "",
     voiceover_tempo: str,
     voiceover_shift: str,
     normalize_final_audio: str,
@@ -485,6 +507,8 @@ def build_configured_project_payload(
     parsed_tts_api = parse_tts_api(tts_api)
     if "voiceover" in resolved_stages_to_run and parsed_tts_api == "elevenlabs" and not providers_present["elevenlabs"]:
         raise HTTPException(status_code=400, detail="ELEVENLABS_API_KEY is required for ElevenLabs TTS")
+    if "voiceover" in resolved_stages_to_run and parsed_tts_api == "vibevoice" and not providers_present["vibevoice"]:
+        raise HTTPException(status_code=400, detail="VIBEVOICE_BASE_URL is required for VibeVoice TTS")
 
     parsed_voiceover_tempo = parse_optional_float(voiceover_tempo, "voiceover_tempo", 0.5, 2.0)
     parsed_voiceover_shift = parse_optional_float(voiceover_shift, "voiceover_shift", -300.0, 300.0)
@@ -512,6 +536,9 @@ def build_configured_project_payload(
         tts_api=parsed_tts_api,
         translation_provider=parsed_translation_provider,
         elevenlabs_voice_id=elevenlabs_voice_id,
+        vibevoice_model=vibevoice_model,
+        vibevoice_cfg_scale=vibevoice_cfg_scale,
+        vibevoice_speed=vibevoice_speed,
         voiceover_tempo=parsed_voiceover_tempo,
         voiceover_shift=parsed_voiceover_shift,
         normalize_final_audio=parse_optional_bool(normalize_final_audio),
@@ -533,11 +560,73 @@ def build_configured_project_payload(
 
 
 def provider_status() -> dict[str, bool]:
+    # Pure env-var checks. /api/health and /api/providers are polled by the UI and
+    # the launcher readiness loop, so a blocking network probe here would make both
+    # hang whenever the local TTS server is down.
     return {
         "openai": bool(os.getenv("OPENAI_API_KEY")),
         "deepl": bool(os.getenv("DEEPL_AUTH_KEY")),
         "elevenlabs": bool(os.getenv("ELEVENLABS_API_KEY")),
+        "vibevoice": bool((os.getenv("VIBEVOICE_BASE_URL") or "").strip()),
     }
+
+
+def vibevoice_base_url() -> str:
+    """Endpoint is operator-controlled: env only, never a request field (SSRF)."""
+    raw = (os.getenv("VIBEVOICE_BASE_URL") or "").strip()
+    if not raw:
+        raise HTTPException(status_code=503, detail="VIBEVOICE_BASE_URL is not set")
+    if urlparse(raw).scheme.lower() not in {"http", "https"}:
+        raise HTTPException(status_code=503, detail="VIBEVOICE_BASE_URL must use http or https")
+    return raw.rstrip("/")
+
+
+def normalize_vibevoice_voices(payload: Any) -> list[str]:
+    if isinstance(payload, dict):
+        for key in ("voices", "data"):
+            if key in payload:
+                return normalize_vibevoice_voices(payload[key])
+        return []
+    if not isinstance(payload, list):
+        return []
+    voices: list[str] = []
+    for entry in payload:
+        if isinstance(entry, str):
+            name = entry.strip()
+        elif isinstance(entry, dict):
+            raw = entry.get("id") or entry.get("name") or entry.get("voice") or ""
+            name = str(raw).strip()
+        else:
+            name = ""
+        if name and name not in voices:
+            voices.append(name)
+    return voices
+
+
+@app.get("/api/tts/vibevoice/voices")
+def vibevoice_voices() -> dict[str, Any]:
+    base_url = vibevoice_base_url()
+    try:
+        response = requests.get(f"{base_url}/voices", timeout=VIBEVOICE_VOICES_TIMEOUT_SECONDS)
+        response.raise_for_status()
+        payload = response.json()
+    except (requests.RequestException, ValueError):
+        # 503, never 500, and never reflecting the upstream body back to the browser:
+        # a stopped local server must not be able to knock over the portal API.
+        raise HTTPException(
+            status_code=503,
+            detail=f"VibeVoice server not reachable at {base_url}. Start it and retry.",
+        ) from None
+
+    voices = normalize_vibevoice_voices(payload)
+    default = ""
+    if isinstance(payload, dict):
+        default = str(payload.get("default") or payload.get("default_voice") or "").strip()
+    if not default:
+        default = (os.getenv("VIBEVOICE_TTS_VOICE") or "").strip()
+    if not default or (voices and default not in voices):
+        default = voices[0] if voices else VIBEVOICE_DEFAULT_VOICE
+    return {"default": default, "voices": voices}
 
 
 @app.get("/api/health")
@@ -570,6 +659,9 @@ def create_project(
     tts_api: str = Form("openai"),
     translation_provider: str = Form("openai"),
     elevenlabs_voice_id: str = Form(""),
+    vibevoice_model: str = Form(""),
+    vibevoice_cfg_scale: str = Form(""),
+    vibevoice_speed: str = Form(""),
     voiceover_tempo: str = Form(str(DEFAULT_VOICEOVER_TEMPO)),
     voiceover_shift: str = Form(str(DEFAULT_VOICEOVER_SHIFT)),
     normalize_final_audio: str = Form(""),
@@ -611,6 +703,9 @@ def create_project(
         tts_api=tts_api,
         translation_provider=translation_provider,
         elevenlabs_voice_id=elevenlabs_voice_id,
+        vibevoice_model=vibevoice_model,
+        vibevoice_cfg_scale=vibevoice_cfg_scale,
+        vibevoice_speed=vibevoice_speed,
         voiceover_tempo=voiceover_tempo,
         voiceover_shift=voiceover_shift,
         normalize_final_audio=normalize_final_audio,
@@ -752,6 +847,9 @@ def start_draft_project(
     tts_api: str = Form("openai"),
     translation_provider: str = Form("openai"),
     elevenlabs_voice_id: str = Form(""),
+    vibevoice_model: str = Form(""),
+    vibevoice_cfg_scale: str = Form(""),
+    vibevoice_speed: str = Form(""),
     voiceover_tempo: str = Form(str(DEFAULT_VOICEOVER_TEMPO)),
     voiceover_shift: str = Form(str(DEFAULT_VOICEOVER_SHIFT)),
     normalize_final_audio: str = Form(""),
@@ -795,6 +893,9 @@ def start_draft_project(
         tts_api=tts_api,
         translation_provider=translation_provider,
         elevenlabs_voice_id=elevenlabs_voice_id,
+        vibevoice_model=vibevoice_model,
+        vibevoice_cfg_scale=vibevoice_cfg_scale,
+        vibevoice_speed=vibevoice_speed,
         voiceover_tempo=voiceover_tempo,
         voiceover_shift=voiceover_shift,
         normalize_final_audio=normalize_final_audio,

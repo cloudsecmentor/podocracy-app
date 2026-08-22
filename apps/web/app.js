@@ -27,10 +27,19 @@ const stageDeselectAllButton = document.querySelector("#stages-deselect-all");
 const stageCheckboxes = Array.from(document.querySelectorAll('input[name="stage"]'));
 const speakerRecognitionCheckbox = form.querySelector('input[name="speaker_recognition"]');
 const numberOfSpeakersInput = form.querySelector('input[name="number_of_speakers"]');
+const ttsEngineSelect = document.querySelector("#tts-engine");
+const ttsEngineHint = document.querySelector("#tts-engine-hint");
+const voiceSelect = document.querySelector("#voice-select");
+const voiceInput = document.querySelector("#voice-input");
+const voiceHint = document.querySelector("#voice-hint");
+const ttsNotice = document.querySelector("#tts-notice");
+const ttsNoticeText = document.querySelector("#tts-notice-text");
+const ttsNoticeDismiss = document.querySelector("#tts-notice-dismiss");
 
 const PROVIDER_LABELS = {
   openai: "OpenAI",
   elevenlabs: "ElevenLabs",
+  vibevoice: "VibeVoice (local)",
   deepl: "DeepL",
   deepseek: "DeepSeek",
   azure: "Azure",
@@ -39,6 +48,126 @@ const PROVIDER_LABELS = {
 };
 
 const PIPELINE_ORDER = ["transcribe", "translate", "customize", "improve", "voiceover"];
+
+const TTS_ENGINE_REQUIREMENTS = {
+  openai: "OPENAI_API_KEY",
+  elevenlabs: "ELEVENLABS_API_KEY",
+  vibevoice: "VIBEVOICE_BASE_URL",
+};
+
+// Snapshot of the built-in OpenAI voices, so switching away from VibeVoice restores them.
+const STATIC_VOICE_OPTIONS = Array.from(voiceSelect.options).map((option) => ({
+  value: option.value,
+  label: option.textContent,
+}));
+
+let providerAvailability = {};
+let vibevoiceVoicesLoaded = false;
+
+function setTtsNotice(text, kind = "warning") {
+  if (!text) {
+    ttsNotice.hidden = true;
+    ttsNoticeText.textContent = "";
+    return;
+  }
+  ttsNotice.className = `notice ${kind}`;
+  ttsNoticeText.textContent = text;
+  ttsNotice.hidden = false;
+}
+
+function setVoiceOptions(options, selected) {
+  voiceSelect.innerHTML = "";
+  for (const option of options) {
+    const element = document.createElement("option");
+    element.value = option.value;
+    element.textContent = option.label;
+    voiceSelect.appendChild(element);
+  }
+  if (selected && options.some((option) => option.value === selected)) {
+    voiceSelect.value = selected;
+  }
+}
+
+// Only one of the two `voice` fields is ever enabled; disabled fields are not submitted.
+function useVoiceSelect() {
+  voiceSelect.hidden = false;
+  voiceSelect.disabled = false;
+  voiceInput.hidden = true;
+  voiceInput.disabled = true;
+  voiceHint.hidden = true;
+}
+
+function useVoiceFreeText(hint) {
+  voiceInput.hidden = false;
+  voiceInput.disabled = false;
+  voiceSelect.hidden = true;
+  voiceSelect.disabled = true;
+  voiceHint.textContent = hint || "";
+  voiceHint.hidden = !hint;
+}
+
+function applyProviderAvailability(providers) {
+  providerAvailability = providers || {};
+  for (const option of Array.from(ttsEngineSelect.options)) {
+    const variable = TTS_ENGINE_REQUIREMENTS[option.value];
+    const available = providerAvailability[option.value] !== false;
+    option.disabled = !available;
+    option.textContent = available
+      ? PROVIDER_LABELS[option.value] || option.value
+      : `${PROVIDER_LABELS[option.value] || option.value} — set ${variable}`;
+  }
+  // Providers are re-polled every few seconds; only move the selection when it
+  // actually changes, so an in-progress voice choice is not reset on every tick.
+  if (ttsEngineSelect.selectedOptions[0]?.disabled) {
+    const fallback = Array.from(ttsEngineSelect.options).find((option) => !option.disabled);
+    if (fallback && fallback.value !== ttsEngineSelect.value) {
+      ttsEngineSelect.value = fallback.value;
+      void syncTtsEngine();
+    }
+  }
+  const variable = TTS_ENGINE_REQUIREMENTS[ttsEngineSelect.value];
+  ttsEngineHint.textContent =
+    providerAvailability[ttsEngineSelect.value] === false ? `Not configured — set ${variable}.` : "";
+}
+
+async function loadVibevoiceVoices() {
+  try {
+    const payload = await api("/api/tts/vibevoice/voices");
+    const voices = Array.isArray(payload.voices) ? payload.voices : [];
+    if (!voices.length) {
+      useVoiceFreeText("The VibeVoice server reported no voices. Type a voice id.");
+      return;
+    }
+    setVoiceOptions(
+      voices.map((voice) => ({ value: voice, label: voice })),
+      payload.default,
+    );
+    useVoiceSelect();
+    vibevoiceVoicesLoaded = true;
+    setTtsNotice("");
+  } catch (error) {
+    // Never block submission on a stopped local server: fall back to free text.
+    vibevoiceVoicesLoaded = false;
+    useVoiceFreeText("Type the voice id configured on your VibeVoice server.");
+    setTtsNotice("VibeVoice server not reachable — start it, or pick another engine.", "warning");
+  }
+}
+
+async function syncTtsEngine() {
+  const variable = TTS_ENGINE_REQUIREMENTS[ttsEngineSelect.value];
+  ttsEngineHint.textContent =
+    providerAvailability[ttsEngineSelect.value] === false ? `Not configured — set ${variable}.` : "";
+  if (ttsEngineSelect.value === "vibevoice") {
+    if (!vibevoiceVoicesLoaded) {
+      await loadVibevoiceVoices();
+    }
+    return;
+  }
+  vibevoiceVoicesLoaded = false;
+  setVoiceOptions(STATIC_VOICE_OPTIONS, STATIC_VOICE_OPTIONS[0]?.value);
+  useVoiceSelect();
+  setTtsNotice("");
+}
 
 function cleanError(text, fallback) {
   const stripped = String(text || "")
@@ -142,6 +271,7 @@ function clearDraftMode() {
 }
 
 function renderProviders(providers) {
+  applyProviderAvailability(providers);
   const entries = Object.entries(providers || {});
   if (!entries.length) {
     providerStatus.innerHTML = `<span class="muted">No providers reported.</span>`;
@@ -623,6 +753,7 @@ form.addEventListener("submit", async (event) => {
     currentDetailSig = null;
     form.reset();
     syncSpeakerRecognitionFields();
+    await syncTtsEngine();
     const startedDraft = Boolean(draftProjectId);
     clearDraftMode();
     setFormMessage(startedDraft ? "Imported project configured and queued." : "Project created and queued.", "ok");
@@ -639,6 +770,10 @@ document.querySelector("#refresh").addEventListener("click", loadProjects);
 stageSelectAllButton.addEventListener("click", () => setAllStages(true));
 stageDeselectAllButton.addEventListener("click", () => setAllStages(false));
 speakerRecognitionCheckbox.addEventListener("change", syncSpeakerRecognitionFields);
+ttsEngineSelect.addEventListener("change", () => {
+  void syncTtsEngine();
+});
+ttsNoticeDismiss.addEventListener("click", () => setTtsNotice(""));
 bemaImportButton.addEventListener("click", () => {
   void importBemaEpisode();
 });

@@ -471,6 +471,48 @@ a:focus-visible {
   border-color: color-mix(in srgb, var(--warn) 25%, transparent);
 }
 
+/* Dismissible inline notice (e.g. local TTS server unreachable) */
+.notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0;
+  padding: 11px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  border: 1px solid transparent;
+  color: var(--mute);
+  background: var(--panel);
+  border-color: var(--line-strong);
+}
+
+.notice.warning {
+  color: var(--warn);
+  background: var(--warn-tint);
+  border-color: color-mix(in srgb, var(--warn) 25%, transparent);
+}
+
+.notice[hidden] {
+  display: none;
+}
+
+.notice-dismiss {
+  flex: none;
+  padding: 0 6px;
+  font-size: 18px;
+  line-height: 1;
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.notice-dismiss:hover {
+  opacity: 1;
+}
+
 /* ---------- Projects list ---------- */
 
 .projects {
