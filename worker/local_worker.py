@@ -11,6 +11,7 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 from pydub import AudioSegment, silence
@@ -23,6 +24,15 @@ from processing_container.speaker_diarization import (
 
 WORKER_VERSION = "local-worker-0.4.0"
 DEFAULT_SPEEDUP_VALUE = 1.2
+VIBEVOICE_DEFAULT_MODEL = "7B"
+VIBEVOICE_DEFAULT_VOICE = "SEBBE"
+VIBEVOICE_DEFAULT_SPEED = 1.0
+# Sized for a cold model load plus one long segment, not for cloud latency.
+VIBEVOICE_DEFAULT_TIMEOUT_SECONDS = 900.0
+# Short, so a stopped server fails now rather than after the read timeout.
+VIBEVOICE_CONNECT_TIMEOUT_SECONDS = 10.0
+VIBEVOICE_HEALTH_TIMEOUT_SECONDS = 5.0
+VIBEVOICE_ERROR_BODY_LIMIT = 400
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
 CUSTOM_RECORDING_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".webm"}
 LANGUAGE_NAMES = {
@@ -944,12 +954,138 @@ def synthesize_elevenlabs_tts(text: str, output: Path, params: dict[str, Any]) -
     output.write_bytes(response.content)
 
 
+def vibevoice_base_url() -> str:
+    """Operator-controlled endpoint. Never read from project params: a per-project
+    base URL would turn the worker into an SSRF gadget inside the Docker network."""
+    raw = (os.getenv("VIBEVOICE_BASE_URL") or "").strip()
+    if not raw:
+        raise RuntimeError("VIBEVOICE_BASE_URL is not set")
+    scheme = urlparse(raw).scheme.lower()
+    if scheme not in {"http", "https"}:
+        raise RuntimeError(f"VIBEVOICE_BASE_URL must use http or https, got {raw.split(':', 1)[0]!r}")
+    return raw.rstrip("/")
+
+
+def vibevoice_headers(accept: str) -> dict[str, str]:
+    headers = {"Content-Type": "application/json", "Accept": accept}
+    api_key = (os.getenv("VIBEVOICE_API_KEY") or "").strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+def vibevoice_read_timeout() -> float:
+    raw = (os.getenv("VIBEVOICE_TIMEOUT_SECONDS") or "").strip()
+    if not raw:
+        return VIBEVOICE_DEFAULT_TIMEOUT_SECONDS
+    try:
+        return float(raw)
+    except ValueError:
+        return VIBEVOICE_DEFAULT_TIMEOUT_SECONDS
+
+
+def resolve_vibevoice_float(params: dict[str, Any], key: str, env_name: str, default: float | None) -> float | None:
+    for candidate in (params.get(key), os.getenv(env_name)):
+        text = str(candidate if candidate is not None else "").strip()
+        if not text:
+            continue
+        try:
+            return float(text)
+        except ValueError:
+            continue
+    return default
+
+
+def truncate_error_body(body: str) -> str:
+    collapsed = " ".join((body or "").split())
+    if len(collapsed) <= VIBEVOICE_ERROR_BODY_LIMIT:
+        return collapsed
+    return f"{collapsed[:VIBEVOICE_ERROR_BODY_LIMIT]}..."
+
+
+def vibevoice_error_detail(response: requests.Response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict) and payload.get("detail") is not None:
+        detail = payload["detail"]
+        return truncate_error_body(detail if isinstance(detail, str) else json.dumps(detail))
+    return truncate_error_body(response.text)
+
+
+def check_vibevoice_server(logger: logging.Logger) -> None:
+    """Fail fast before the voiceover stage. Voiceover is last in a long pipeline;
+    finding an unreachable server after transcribe/translate/improve wastes the run."""
+    base_url = vibevoice_base_url()
+    root_url = base_url[: -len("/v1")] if base_url.endswith("/v1") else base_url
+    candidates = [f"{base_url}/health"]
+    if root_url != base_url:
+        candidates.append(f"{root_url}/health")
+
+    for url in candidates:
+        try:
+            response = requests.get(
+                url,
+                headers=vibevoice_headers("application/json"),
+                timeout=(VIBEVOICE_CONNECT_TIMEOUT_SECONDS, VIBEVOICE_HEALTH_TIMEOUT_SECONDS),
+            )
+        except requests.RequestException as exc:
+            logger.info("VibeVoice health check failed at %s: %s", url, type(exc).__name__)
+            continue
+        if response.ok:
+            logger.info("VibeVoice server reachable at %s", base_url)
+            return
+        logger.info("VibeVoice health check at %s returned HTTP %s", url, response.status_code)
+
+    raise RuntimeError(f"VibeVoice server not reachable at {base_url}. Start it and retry.")
+
+
+def synthesize_vibevoice_tts(
+    text: str,
+    output: Path,
+    params: dict[str, Any],
+    response_format: str = "mp3",
+) -> None:
+    base_url = vibevoice_base_url()
+    model = str(params.get("vibevoice_model") or os.getenv("VIBEVOICE_TTS_MODEL") or VIBEVOICE_DEFAULT_MODEL)
+    voice = str(params.get("voice") or os.getenv("VIBEVOICE_TTS_VOICE") or VIBEVOICE_DEFAULT_VOICE)
+    payload: dict[str, Any] = {
+        "input": text,
+        "voice": voice,
+        "model": model,
+        "response_format": response_format,
+    }
+    speed = resolve_vibevoice_float(params, "vibevoice_speed", "VIBEVOICE_SPEED", VIBEVOICE_DEFAULT_SPEED)
+    if speed is not None:
+        payload["speed"] = speed
+    cfg_scale = resolve_vibevoice_float(params, "vibevoice_cfg_scale", "VIBEVOICE_CFG_SCALE", None)
+    if cfg_scale is not None:
+        payload["cfg_scale"] = cfg_scale
+
+    response = requests.post(
+        f"{base_url}/audio/speech",
+        headers=vibevoice_headers("audio/mpeg"),
+        json=payload,
+        timeout=(VIBEVOICE_CONNECT_TIMEOUT_SECONDS, vibevoice_read_timeout()),
+    )
+    if not response.ok:
+        raise RuntimeError(f"VibeVoice TTS failed with HTTP {response.status_code}: {vibevoice_error_detail(response)}")
+    if not response.content:
+        raise RuntimeError("VibeVoice TTS returned an empty audio response")
+    output.write_bytes(response.content)
+
+
 def synthesize_segments(segments: list[dict[str, Any]], params: dict[str, Any], project: Path, logger: logging.Logger) -> list[dict[str, Any]]:
     tts_dir = project / "work" / "tts"
     tts_dir.mkdir(parents=True, exist_ok=True)
     tts_api = str(params.get("tts_api") or "openai").lower()
     voice = params.get("voice") or os.getenv("OPENAI_TTS_VOICE", "alloy")
     sleep_time = float(params.get("sleep_time_tts", os.getenv("OPENAI_TTS_DELAY", "0.2")))
+    if tts_api == "vibevoice":
+        # The inter-request sleep exists to respect cloud rate limits; a local
+        # server has none, and the delay adds up across hundreds of segments.
+        sleep_time = 0.0
     translation_key = str(params.get("translation_text_key") or "translated_text")
     improved_key = str(params.get("improved_text_key") or "voiceover_text")
 
@@ -965,12 +1101,25 @@ def synthesize_segments(segments: list[dict[str, Any]], params: dict[str, Any], 
         start = str(segment.get("start", seconds_to_timecode(segment_start_seconds(segment), timing_format)))
         end = str(segment.get("end", seconds_to_timecode(segment_end_seconds(segment), timing_format)))
         output = tts_dir / f"{start}-{end}.mp3"
+        started_at = time.monotonic()
         if tts_api == "elevenlabs":
-            logger.info("Synthesizing segment %s/%s with ElevenLabs", index + 1, len(segments))
+            logger.info("Synthesizing segment %s/%s with ElevenLabs (%s chars)", index + 1, len(segments), len(text))
             synthesize_elevenlabs_tts(text, output, params)
+        elif tts_api == "vibevoice":
+            logger.info(
+                "Synthesizing segment %s/%s with VibeVoice voice %s (%s chars)",
+                index + 1,
+                len(segments),
+                voice,
+                len(text),
+            )
+            synthesize_vibevoice_tts(text, output, params)
         else:
-            logger.info("Synthesizing segment %s/%s with OpenAI voice %s", index + 1, len(segments), voice)
+            logger.info("Synthesizing segment %s/%s with OpenAI voice %s (%s chars)", index + 1, len(segments), voice, len(text))
             synthesize_openai_tts(text, output, params)
+        # Local synthesis runs slower than real time; without timings a long job
+        # is indistinguishable from a hang.
+        logger.info("Segment %s/%s synthesized in %.1fs", index + 1, len(segments), time.monotonic() - started_at)
         item = dict(segment)
         item["tts_path"] = str(output)
         synthesized.append(item)
@@ -1389,11 +1538,14 @@ def process_project(project: Path) -> None:
             voiceover_shift = resolve_voiceover_shift(params, logger)
             manifest["voiceover_tempo"] = voiceover_tempo
             manifest["voiceover_shift"] = voiceover_shift
-            manifest["provider_selection"]["tts"] = str(params.get("tts_api") or "openai").lower()
+            tts_provider = str(params.get("tts_api") or "openai").lower()
+            manifest["provider_selection"]["tts"] = tts_provider
             update_status(project, "running", "voiceover", 75, "Generating voiceover audio")
             if parse_legacy_bool(params.get("custom_recording", False)):
                 synthesized = run_stage(project, manifest, "custom-recordings", lambda: load_custom_recordings(segments, params, project, logger), logger)
             else:
+                if tts_provider == "vibevoice":
+                    run_stage(project, manifest, "tts-preflight", lambda: check_vibevoice_server(logger), logger)
                 synthesized = run_stage(project, manifest, "tts", lambda: synthesize_segments(segments, params, project, logger), logger)
             if voiceover_tempo != 1.0:
                 synthesized = run_stage(

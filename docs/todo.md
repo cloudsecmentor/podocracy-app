@@ -14,7 +14,12 @@
 
 - [x] Restore optional ElevenLabs TTS provider selection.
   - Legacy source: `pd-050-voiceover.py` supports `tts_api=elevenlabs`.
-  - Current gap: the portal reports `ELEVENLABS_API_KEY` presence but always writes `tts_api: openai` and uses OpenAI TTS.
+  - Current behavior: the portal exposes a voiceover-engine picker, writes the chosen `tts_api`, and validates that the provider is configured before queueing.
+
+- [x] Add a local, self-hosted TTS provider (`tts_api=vibevoice`).
+  - Setup and troubleshooting: [docs/local-tts-vibevoice.md](local-tts-vibevoice.md). Design notes live in the local `prd/` folder, which is not tracked in git.
+  - Current behavior: `VIBEVOICE_BASE_URL` enables the provider, the narrator-voice picker is populated from the running server's `/v1/voices`, and the job fails fast at a preflight check when the server is unreachable.
+  - Not done: desktop-app onboarding for the server, multi-speaker scripts, and per-segment voice assignment driven by speaker recognition.
 
 - [x] Restore custom/manual recording workflow.
   - Legacy source: `pd-005-preprocess.py` and `pd-050-voiceover.py` support `custom_recording`, download/convert WebM/M4A/OGG recordings, normalize audio, remove clicks, and remove long pauses.

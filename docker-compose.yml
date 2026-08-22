@@ -22,6 +22,10 @@ services:
       - type: bind
         source: ${PODOCRACY_PROJECTS_DIR:-./data/projects}
         target: /data/projects
+    # Lets the containers reach a TTS server bound to the host (VIBEVOICE_BASE_URL).
+    # Docker Desktop resolves this natively; Linux and Colima need the explicit mapping.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     expose:
       - "8000"
     restart: unless-stopped
@@ -40,6 +44,10 @@ services:
         source: ${PODOCRACY_PROJECTS_DIR:-./data/projects}
         target: /data/projects
       - pyannote-cache:/root/.cache/huggingface
+    # Lets the containers reach a TTS server bound to the host (VIBEVOICE_BASE_URL).
+    # Docker Desktop resolves this natively; Linux and Colima need the explicit mapping.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - app-api
     restart: unless-stopped

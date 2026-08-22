@@ -182,6 +182,13 @@ colima start
 | `OPENAI_API_KEY` | empty | Required for OpenAI-backed transcription/TTS/translation paths. |
 | `DEEPL_AUTH_KEY` | empty | Enables DeepL translation provider. |
 | `ELEVENLABS_API_KEY` | empty | Enables ElevenLabs TTS provider. |
+| `VIBEVOICE_BASE_URL` | empty (`http://host.docker.internal:8000/v1` when enabled) | Root of a local OpenAI-compatible VibeVoice TTS server. Setting a value enables the provider. |
+| `VIBEVOICE_API_KEY` | empty | Bearer token for the VibeVoice server; sent only when non-empty. |
+| `VIBEVOICE_TTS_MODEL` | `7B` | VibeVoice checkpoint or OpenAI alias sent as `model`. |
+| `VIBEVOICE_TTS_VOICE` | `SEBBE` | Fallback VibeVoice voice when the project has none. |
+| `VIBEVOICE_TIMEOUT_SECONDS` | `900` | Per-request read timeout for VibeVoice; sized for cold start plus a long segment. |
+| `VIBEVOICE_CFG_SCALE` | empty | Optional VibeVoice guidance scale 1.0-3.0; omitted when empty. |
+| `VIBEVOICE_SPEED` | `1.0` | Optional pitch-preserving VibeVoice speed 0.25-4.0. |
 | `HF_TOKEN` | empty | Required when local pyannote speaker recognition is enabled. |
 | `PYANNOTE_MODEL` | `pyannote/speaker-diarization-community-1` | Hugging Face model ID or local pyannote model directory. |
 | `PORTAL_ADMIN_PASSWORD` | empty | Optional HTTP basic auth password for the web portal; set this for any non-local exposure. |
@@ -215,6 +222,15 @@ export PODOCRACY_PROJECTS_DIR="$HOME/podocracy-projects"
 ```
 
 Open `http://localhost:8080`.
+
+### Local TTS with VibeVoice
+
+Point the voiceover stage at a self-hosted, OpenAI-compatible VibeVoice server instead of a
+paid cloud API: no per-minute cost, no script text leaving the machine, and narration in a
+zero-shot clone of your own voice. Set `VIBEVOICE_BASE_URL`, then pick **VibeVoice (local)**
+as the voiceover engine in the portal. See
+[docs/local-tts-vibevoice.md](docs/local-tts-vibevoice.md) for setup, throughput
+expectations, and the security warning about exposing the server.
 
 ### Prebuilt Images From Repo Checkout
 

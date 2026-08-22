@@ -45,7 +45,19 @@
     },
     "tts_api": {
         "value": "openai",
-        "description": "Options: 'elevenlabs', 'openai'. TTS API to be used."
+        "description": "Options: 'elevenlabs', 'openai', 'vibevoice'. TTS API to be used."
+    },
+    "vibevoice_model": {
+        "value": "7B",
+        "description": "VibeVoice checkpoint or OpenAI alias used when tts_api is vibevoice."
+    },
+    "vibevoice_cfg_scale": {
+        "value": "",
+        "description": "Optional VibeVoice guidance scale 1.0-3.0; empty uses the server default."
+    },
+    "vibevoice_speed": {
+        "value": 1.0,
+        "description": "Optional VibeVoice playback speed 0.25-4.0, pitch preserving."
     },
     "speedup_value": {
         "value": 1.2,
