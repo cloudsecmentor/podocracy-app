@@ -63,21 +63,45 @@
         "value": 1.2,
         "description": "Speedup value."
     },
+    "stt_provider": {
+        "value": "openai",
+        "description": "Speech-to-text provider. Options: 'openai' (Whisper API) or 'local-whisper' (runs Whisper in the worker)."
+    },
+    "stt_chunk_length_sec": {
+        "value": 300,
+        "description": "Length in seconds of the chunks audio is split into when it exceeds stt_max_upload_size_mb."
+    },
+    "stt_silence_split": {
+        "value": false,
+        "description": "Split audio on silence between speech [true] instead of fixed stt_chunk_length_sec pieces [false]."
+    },
+    "stt_silence_sec": {
+        "value": 2,
+        "description": "How long silence between speech must be to count as a split point for stt_silence_split."
+    },
+    "stt_max_upload_size_mb": {
+        "value": 24,
+        "description": "Max size in MB a provider accepts in one request; larger audio is split into chunks."
+    },
+    "stt_local_model": {
+        "value": "small",
+        "description": "Model used by the local-whisper provider when the project does not set stt_model."
+    },
     "whisper_chunk_length_sec": {
         "value": 300,
-        "description": "Length in seconds of chunks which we split audio for processing by whisper api."
+        "description": "Deprecated, use stt_chunk_length_sec. Length in seconds of chunks which we split audio for processing by whisper api."
     },
     "whisper_silence_split": {
         "value": false,
-        "description": "Should aduio be splitted by silence between speech [true] or just by whisper_chunk_length_sec [false]."
+        "description": "Deprecated, use stt_silence_split. Should aduio be splitted by silence between speech [true] or just by whisper_chunk_length_sec [false]."
     },
     "whisper_silence_sec": {
         "value": 2,
-        "description": "How long should be silence between speech to be considered for split for whisper chunks."
+        "description": "Deprecated, use stt_silence_sec. How long should be silence between speech to be considered for split for whisper chunks."
     },
     "whisper_api": {
         "value": true,
-        "description": "Use whisper API. If false, use whisper locally."
+        "description": "Deprecated, use stt_provider. Kept so projects created before the provider boundary still resolve to a provider. Use whisper API. If false, use whisper locally."
     },
     "speaker_recognition": {
         "value": false,
@@ -89,11 +113,11 @@
     },
     "whisper_default_model_local": {
         "value": "small",
-        "description": "The model which will be used for whisper locally if not provided by the user."
+        "description": "Deprecated, use stt_local_model. The model which will be used for whisper locally if not provided by the user."
     },
     "whisper_api_max_size_mp3": {
         "value": 24,
-        "description": "Max size in MB of audio file for whisper API."
+        "description": "Deprecated, use stt_max_upload_size_mb. Max size in MB of audio file for whisper API."
     },
     "number_of_issues_to_find": {
         "value": 50,

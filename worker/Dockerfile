@@ -15,6 +15,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY worker_poll.py ./
 COPY processing_container ./processing_container
 COPY common ./common
+COPY stt ./stt
 COPY frontend ./frontend
 
 RUN chmod +x /app/processing_container/pd-051-ffmpeg-norm.sh

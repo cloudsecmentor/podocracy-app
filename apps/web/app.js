@@ -29,6 +29,8 @@ const speakerRecognitionCheckbox = form.querySelector('input[name="speaker_recog
 const numberOfSpeakersInput = form.querySelector('input[name="number_of_speakers"]');
 const ttsEngineSelect = document.querySelector("#tts-engine");
 const ttsEngineHint = document.querySelector("#tts-engine-hint");
+const sttEngineSelect = document.querySelector("#stt-engine");
+const sttEngineHint = document.querySelector("#stt-engine-hint");
 const voiceSelect = document.querySelector("#voice-select");
 const voiceInput = document.querySelector("#voice-input");
 const voiceHint = document.querySelector("#voice-hint");
@@ -38,6 +40,7 @@ const ttsNoticeDismiss = document.querySelector("#tts-notice-dismiss");
 
 const PROVIDER_LABELS = {
   openai: "OpenAI",
+  "local-whisper": "Local Whisper (in worker)",
   elevenlabs: "ElevenLabs",
   vibevoice: "VibeVoice (local)",
   deepl: "DeepL",
@@ -53,6 +56,17 @@ const TTS_ENGINE_REQUIREMENTS = {
   openai: "OPENAI_API_KEY",
   elevenlabs: "ELEVENLABS_API_KEY",
   vibevoice: "VIBEVOICE_BASE_URL",
+};
+
+// Transcription engines; local-whisper runs inside the worker and needs no key.
+const STT_ENGINE_REQUIREMENTS = {
+  openai: "OPENAI_API_KEY",
+  "local-whisper": "",
+};
+
+const STT_ENGINE_LABELS = {
+  openai: "OpenAI Whisper API",
+  "local-whisper": "Local Whisper (in worker)",
 };
 
 // Snapshot of the built-in OpenAI voices, so switching away from VibeVoice restores them.
@@ -106,8 +120,32 @@ function useVoiceFreeText(hint) {
   voiceHint.hidden = !hint;
 }
 
+function syncSttEngine() {
+  const variable = STT_ENGINE_REQUIREMENTS[sttEngineSelect.value];
+  sttEngineHint.textContent =
+    variable && providerAvailability[sttEngineSelect.value] === false
+      ? `Not configured — set ${variable}.`
+      : sttEngineSelect.value === "local-whisper"
+        ? "Runs Whisper in the worker; no API key, slower on first use."
+        : "";
+}
+
 function applyProviderAvailability(providers) {
   providerAvailability = providers || {};
+  for (const option of Array.from(sttEngineSelect.options)) {
+    const variable = STT_ENGINE_REQUIREMENTS[option.value];
+    const available = providerAvailability[option.value] !== false;
+    const label = STT_ENGINE_LABELS[option.value] || option.value;
+    option.disabled = !available;
+    option.textContent = available || !variable ? label : `${label} — set ${variable}`;
+  }
+  if (sttEngineSelect.selectedOptions[0]?.disabled) {
+    const fallback = Array.from(sttEngineSelect.options).find((option) => !option.disabled);
+    if (fallback && fallback.value !== sttEngineSelect.value) {
+      sttEngineSelect.value = fallback.value;
+    }
+  }
+  syncSttEngine();
   for (const option of Array.from(ttsEngineSelect.options)) {
     const variable = TTS_ENGINE_REQUIREMENTS[option.value];
     const available = providerAvailability[option.value] !== false;
@@ -753,6 +791,7 @@ form.addEventListener("submit", async (event) => {
     currentDetailSig = null;
     form.reset();
     syncSpeakerRecognitionFields();
+    syncSttEngine();
     await syncTtsEngine();
     const startedDraft = Boolean(draftProjectId);
     clearDraftMode();
@@ -773,6 +812,7 @@ speakerRecognitionCheckbox.addEventListener("change", syncSpeakerRecognitionFiel
 ttsEngineSelect.addEventListener("change", () => {
   void syncTtsEngine();
 });
+sttEngineSelect.addEventListener("change", syncSttEngine);
 ttsNoticeDismiss.addEventListener("click", () => setTtsNotice(""));
 bemaImportButton.addEventListener("click", () => {
   void importBemaEpisode();
@@ -783,5 +823,6 @@ cancelDraftButton.addEventListener("click", () => {
 });
 
 syncSpeakerRecognitionFields();
+syncSttEngine();
 loadProjects();
 refreshTimer = setInterval(loadProjects, 5000);

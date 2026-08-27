@@ -6,6 +6,7 @@ import logging
 from openai import OpenAI
 from pydantic import BaseModel, Field, ValidationError, TypeAdapter
 from shared_functions import *
+from stt.schema import iter_transcript_words
 
 class Speakers(BaseModel):
     speakers: list[str] = Field(..., description="A list of unique speaker names identified from the transcript.")
@@ -249,11 +250,8 @@ def split_text_to_words_with_start_end_time(chunk: dict):
 
 
 def get_words_timings_from_raw(transcript_raw):
-    words_start = []
-    for chunk in transcript_raw["segments"]:
-        words_start += split_text_to_words_with_start_end_time(chunk)
-        # print(split_text_to_words_with_start_time (chunk))
-    return words_start
+    """Words of a canonical transcript, whichever provider produced it."""
+    return iter_transcript_words(transcript_raw)
 
 
 
