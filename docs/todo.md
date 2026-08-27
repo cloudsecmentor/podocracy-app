@@ -38,7 +38,7 @@
   - Current gap: portal output is audio-only.
 
 - [x] Restore transcript chunking with legacy-style word-level pipeline.
-  - Legacy source: `pd-010-02-whisper-api-transcribe.py`, `pd-020-combine.py`, and `pd-025-timesync.py` split audio, preserve word timings, align chunks, and support long-file `hhmmss`.
+  - Legacy source: `pd-010-02-whisper-api-transcribe.py` (since folded into the `worker/stt` provider boundary), `pd-020-combine.py`, and `pd-025-timesync.py` split audio, preserve word timings, align chunks, and support long-file `hhmmss`.
   - Current behavior: portal can split transcription audio by max length or silence, request detailed word timestamps, recombine words into sentence/chunks, and keep long-file `hhmmss` output.
 
 - [x] Restore speaker-aware proofread/timesync alignment.

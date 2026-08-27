@@ -25,6 +25,7 @@ PROJECTS_DIR = Path(os.getenv("PROJECTS_DIR", "/data/projects"))
 PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
 DOWNLOADABLE_WORK_FILES = {
     "source.raw.json",
+    "source.stt-provider-response.json",
     "source.diarization.json",
     "source.combined.json",
     "source.translated.json",
@@ -48,8 +49,13 @@ DEFAULT_SPEEDUP_VALUE = 1.2
 DEFAULT_VOICEOVER_TEMPO = 1.2
 DEFAULT_VOICEOVER_SHIFT = 1.5
 DEFAULT_MAX_PREVIEW_SIZE_MB = 2.0
-DEFAULT_WHISPER_CHUNK_LENGTH_SEC = 300
-DEFAULT_WHISPER_SILENCE_SEC = 2.0
+DEFAULT_STT_CHUNK_LENGTH_SEC = 300
+DEFAULT_STT_SILENCE_SEC = 2.0
+DEFAULT_STT_PROVIDER = "openai"
+# Kept in sync with worker/stt/registry.py; the API only needs the names.
+SUPPORTED_STT_PROVIDERS = {"openai", "local-whisper"}
+# Providers that reach OpenAI, per stage, so the key is only demanded when used.
+OPENAI_STT_PROVIDERS = {"openai"}
 DEFAULT_NUMBER_OF_SPEAKERS = 2
 DEFAULT_MAX_CHAR_CHUNK_PER_SENTENCE = 200
 DEFAULT_MAX_CHAR_CHUNK = 400
@@ -261,6 +267,16 @@ def parse_tts_api(value: str) -> str:
     return tts_api
 
 
+def parse_stt_provider(value: str) -> str:
+    provider = (optional_form_text(value) or DEFAULT_STT_PROVIDER).lower()
+    # Accept the legacy spellings a scripted client may still send.
+    provider = {"whisper-api": "openai", "openai-whisper": "openai", "whisper": "local-whisper"}.get(provider, provider)
+    if provider not in SUPPORTED_STT_PROVIDERS:
+        supported = ", ".join(sorted(SUPPORTED_STT_PROVIDERS))
+        raise HTTPException(status_code=400, detail=f"stt_provider must be one of: {supported}")
+    return provider
+
+
 def parse_translation_provider(value: str) -> str:
     provider = (value or "openai").strip().lower()
     if provider not in {"openai", "deepl"}:
@@ -362,6 +378,7 @@ def build_project_payload(
     custom_instructions: str,
     tts_api: str,
     translation_provider: str = "openai",
+    stt_provider: str = DEFAULT_STT_PROVIDER,
     elevenlabs_voice_id: str = "",
     vibevoice_model: str = "",
     vibevoice_cfg_scale: str = "",
@@ -375,9 +392,9 @@ def build_project_payload(
     detailed_transcription: bool = True,
     speaker_recognition: bool = False,
     number_of_speakers: int = DEFAULT_NUMBER_OF_SPEAKERS,
-    whisper_chunk_length_sec: int = DEFAULT_WHISPER_CHUNK_LENGTH_SEC,
-    whisper_silence_split: bool = False,
-    whisper_silence_sec: float = DEFAULT_WHISPER_SILENCE_SEC,
+    stt_chunk_length_sec: int = DEFAULT_STT_CHUNK_LENGTH_SEC,
+    stt_silence_split: bool = False,
+    stt_silence_sec: float = DEFAULT_STT_SILENCE_SEC,
     max_char_chunk_per_sentence: int = DEFAULT_MAX_CHAR_CHUNK_PER_SENTENCE,
     max_char_chunk: int = DEFAULT_MAX_CHAR_CHUNK,
     improve_max_chunk_chars: int = DEFAULT_IMPROVE_MAX_CHUNK_CHARS,
@@ -387,6 +404,7 @@ def build_project_payload(
     parsed_tts_api = parse_tts_api(tts_api)
     parsed_language = parse_target_language(language)
     parsed_translation_provider = parse_translation_provider(translation_provider)
+    parsed_stt_provider = parse_stt_provider(stt_provider)
     resolved_stages = normalize_stage_list(stages_to_run, stage_preset)
     params = {
         "schema_version": "local-worker-v1",
@@ -398,7 +416,10 @@ def build_project_payload(
         "custom_instructions": custom_instructions,
         "stage_preset": stage_preset,
         "stages_to_run": resolved_stages,
-        "whisper_api": True,
+        "stt_provider": parsed_stt_provider,
+        # Legacy mirror of stt_provider, so a worker built before the provider
+        # boundary still selects the same engine from this params file.
+        "whisper_api": parsed_stt_provider in OPENAI_STT_PROVIDERS,
         "tts_api": parsed_tts_api,
         "translation_provider": parsed_translation_provider,
         "translation_text_key": "dltrans",
@@ -410,9 +431,9 @@ def build_project_payload(
         "detailed_transcription": detailed_transcription,
         "speaker_recognition": speaker_recognition,
         "number_of_speakers": number_of_speakers,
-        "whisper_chunk_length_sec": whisper_chunk_length_sec,
-        "whisper_silence_split": whisper_silence_split,
-        "whisper_silence_sec": whisper_silence_sec,
+        "stt_chunk_length_sec": stt_chunk_length_sec,
+        "stt_silence_split": stt_silence_split,
+        "stt_silence_sec": stt_silence_sec,
         "max_char_chunk_per_sentence": max_char_chunk_per_sentence,
         "max_char_chunk": max_char_chunk,
         "improve_max_chunk_chars": improve_max_chunk_chars,
@@ -450,6 +471,7 @@ def build_project_payload(
         "stages_to_run": resolved_stages,
         "tts_api": parsed_tts_api,
         "translation_provider": parsed_translation_provider,
+        "stt_provider": parsed_stt_provider,
         "voiceover_tempo": voiceover_tempo if voiceover_tempo is not None else DEFAULT_VOICEOVER_TEMPO,
         "voiceover_shift": voiceover_shift if voiceover_shift is not None else DEFAULT_VOICEOVER_SHIFT,
         "custom_subtitles": bool(subtitle_relative),
@@ -463,6 +485,31 @@ def build_project_payload(
     return params, metadata
 
 
+def openai_stages(
+    stages_to_run: str,
+    *,
+    stt_provider: str,
+    translation_provider: str,
+    tts_api: str,
+) -> list[str]:
+    """Selected stages that call OpenAI, so the key is only required when used.
+
+    Improve and customize have no provider switch yet, so they always count.
+    """
+    stages = [stage for stage in stages_to_run.split("+") if stage]
+    needed = []
+    for stage in stages:
+        if stage == "transcribe" and stt_provider in OPENAI_STT_PROVIDERS:
+            needed.append(stage)
+        elif stage == "translate" and translation_provider == "openai":
+            needed.append(stage)
+        elif stage in {"customize", "improve"}:
+            needed.append(stage)
+        elif stage == "voiceover" and tts_api == "openai":
+            needed.append(stage)
+    return needed
+
+
 def build_configured_project_payload(
     *,
     filename: str,
@@ -473,6 +520,7 @@ def build_configured_project_payload(
     custom_instructions: str,
     tts_api: str,
     translation_provider: str,
+    stt_provider: str,
     elevenlabs_voice_id: str,
     vibevoice_model: str = "",
     vibevoice_cfg_scale: str = "",
@@ -486,9 +534,9 @@ def build_configured_project_payload(
     detailed_transcription: str,
     speaker_recognition: str,
     number_of_speakers: str,
-    whisper_chunk_length_sec: str,
-    whisper_silence_split: str,
-    whisper_silence_sec: str,
+    stt_chunk_length_sec: str,
+    stt_silence_split: str,
+    stt_silence_sec: str,
     max_char_chunk_per_sentence: str,
     max_char_chunk: str,
     improve_max_chunk_chars: str,
@@ -496,15 +544,27 @@ def build_configured_project_payload(
     custom_recordings_relative: str = "",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     providers_present = provider_status()
-    if not providers_present["openai"]:
-        raise HTTPException(status_code=400, detail="OPENAI_API_KEY is required")
 
     parsed_language = parse_target_language(language)
     parsed_translation_provider = parse_translation_provider(translation_provider)
+    parsed_stt_provider = parse_stt_provider(stt_provider)
     if parsed_translation_provider == "deepl" and not providers_present["deepl"]:
         raise HTTPException(status_code=400, detail="DEEPL_AUTH_KEY is required for DeepL translation")
     resolved_stages_to_run = normalize_stage_list(stages_to_run, stage_preset)
     parsed_tts_api = parse_tts_api(tts_api)
+
+    if not providers_present["openai"]:
+        needed_by = openai_stages(
+            resolved_stages_to_run,
+            stt_provider=parsed_stt_provider,
+            translation_provider=parsed_translation_provider,
+            tts_api=parsed_tts_api,
+        )
+        if needed_by:
+            raise HTTPException(
+                status_code=400,
+                detail=f"OPENAI_API_KEY is required for these stages: {', '.join(needed_by)}",
+            )
     if "voiceover" in resolved_stages_to_run and parsed_tts_api == "elevenlabs" and not providers_present["elevenlabs"]:
         raise HTTPException(status_code=400, detail="ELEVENLABS_API_KEY is required for ElevenLabs TTS")
     if "voiceover" in resolved_stages_to_run and parsed_tts_api == "vibevoice" and not providers_present["vibevoice"]:
@@ -513,8 +573,8 @@ def build_configured_project_payload(
     parsed_voiceover_tempo = parse_optional_float(voiceover_tempo, "voiceover_tempo", 0.5, 2.0)
     parsed_voiceover_shift = parse_optional_float(voiceover_shift, "voiceover_shift", -300.0, 300.0)
     parsed_max_preview_size_mb = parse_optional_float(max_preview_size_mb, "max_preview_size_mb", 0.1, 500.0)
-    parsed_whisper_chunk_length_sec = parse_optional_float(whisper_chunk_length_sec, "whisper_chunk_length_sec", 10.0, 3600.0)
-    parsed_whisper_silence_sec = parse_optional_float(whisper_silence_sec, "whisper_silence_sec", 0.1, 30.0)
+    parsed_stt_chunk_length_sec = parse_optional_float(stt_chunk_length_sec, "stt_chunk_length_sec", 10.0, 3600.0)
+    parsed_stt_silence_sec = parse_optional_float(stt_silence_sec, "stt_silence_sec", 0.1, 30.0)
     parsed_max_char_chunk_per_sentence = parse_optional_float(max_char_chunk_per_sentence, "max_char_chunk_per_sentence", 20.0, 5000.0)
     parsed_max_char_chunk = parse_optional_float(max_char_chunk, "max_char_chunk", 50.0, 20000.0)
     parsed_improve_max_chunk_chars = parse_optional_float(improve_max_chunk_chars, "improve_max_chunk_chars", 500.0, 200000.0)
@@ -535,6 +595,7 @@ def build_configured_project_payload(
         custom_instructions=custom_instructions,
         tts_api=parsed_tts_api,
         translation_provider=parsed_translation_provider,
+        stt_provider=parsed_stt_provider,
         elevenlabs_voice_id=elevenlabs_voice_id,
         vibevoice_model=vibevoice_model,
         vibevoice_cfg_scale=vibevoice_cfg_scale,
@@ -548,9 +609,9 @@ def build_configured_project_payload(
         detailed_transcription=parse_bool(detailed_transcription, default=True),
         speaker_recognition=parse_optional_bool(speaker_recognition),
         number_of_speakers=parsed_number_of_speakers,
-        whisper_chunk_length_sec=int(parsed_whisper_chunk_length_sec or DEFAULT_WHISPER_CHUNK_LENGTH_SEC),
-        whisper_silence_split=parse_optional_bool(whisper_silence_split),
-        whisper_silence_sec=parsed_whisper_silence_sec if parsed_whisper_silence_sec is not None else DEFAULT_WHISPER_SILENCE_SEC,
+        stt_chunk_length_sec=int(parsed_stt_chunk_length_sec or DEFAULT_STT_CHUNK_LENGTH_SEC),
+        stt_silence_split=parse_optional_bool(stt_silence_split),
+        stt_silence_sec=parsed_stt_silence_sec if parsed_stt_silence_sec is not None else DEFAULT_STT_SILENCE_SEC,
         max_char_chunk_per_sentence=int(parsed_max_char_chunk_per_sentence or DEFAULT_MAX_CHAR_CHUNK_PER_SENTENCE),
         max_char_chunk=int(parsed_max_char_chunk or DEFAULT_MAX_CHAR_CHUNK),
         improve_max_chunk_chars=int(parsed_improve_max_chunk_chars or DEFAULT_IMPROVE_MAX_CHUNK_CHARS),
@@ -568,6 +629,8 @@ def provider_status() -> dict[str, bool]:
         "deepl": bool(os.getenv("DEEPL_AUTH_KEY")),
         "elevenlabs": bool(os.getenv("ELEVENLABS_API_KEY")),
         "vibevoice": bool((os.getenv("VIBEVOICE_BASE_URL") or "").strip()),
+        # Runs inside the worker, so it needs no credential of its own.
+        "local-whisper": True,
     }
 
 
@@ -658,6 +721,7 @@ def create_project(
     custom_instructions: str = Form(""),
     tts_api: str = Form("openai"),
     translation_provider: str = Form("openai"),
+    stt_provider: str = Form(DEFAULT_STT_PROVIDER),
     elevenlabs_voice_id: str = Form(""),
     vibevoice_model: str = Form(""),
     vibevoice_cfg_scale: str = Form(""),
@@ -671,12 +735,16 @@ def create_project(
     detailed_transcription: str = Form("true"),
     speaker_recognition: str = Form(""),
     number_of_speakers: str = Form(str(DEFAULT_NUMBER_OF_SPEAKERS)),
-    whisper_chunk_length_sec: str = Form(str(DEFAULT_WHISPER_CHUNK_LENGTH_SEC)),
-    whisper_silence_split: str = Form(""),
-    whisper_silence_sec: str = Form(str(DEFAULT_WHISPER_SILENCE_SEC)),
+    stt_chunk_length_sec: str = Form(""),
+    stt_silence_split: str = Form(""),
+    stt_silence_sec: str = Form(""),
     max_char_chunk_per_sentence: str = Form(str(DEFAULT_MAX_CHAR_CHUNK_PER_SENTENCE)),
     max_char_chunk: str = Form(str(DEFAULT_MAX_CHAR_CHUNK)),
     improve_max_chunk_chars: str = Form(str(DEFAULT_IMPROVE_MAX_CHUNK_CHARS)),
+    # Pre-rename field names, still accepted from scripted clients.
+    whisper_chunk_length_sec: str = Form(""),
+    whisper_silence_split: str = Form(""),
+    whisper_silence_sec: str = Form(""),
 ) -> dict[str, Any]:
     if not source_url.strip() and (source is None or not source.filename):
         raise HTTPException(status_code=400, detail="Upload a source file or provide a source URL")
@@ -702,6 +770,7 @@ def create_project(
         custom_instructions=custom_instructions,
         tts_api=tts_api,
         translation_provider=translation_provider,
+        stt_provider=stt_provider,
         elevenlabs_voice_id=elevenlabs_voice_id,
         vibevoice_model=vibevoice_model,
         vibevoice_cfg_scale=vibevoice_cfg_scale,
@@ -715,9 +784,9 @@ def create_project(
         detailed_transcription=detailed_transcription,
         speaker_recognition=speaker_recognition,
         number_of_speakers=number_of_speakers,
-        whisper_chunk_length_sec=whisper_chunk_length_sec,
-        whisper_silence_split=whisper_silence_split,
-        whisper_silence_sec=whisper_silence_sec,
+        stt_chunk_length_sec=optional_form_text(stt_chunk_length_sec) or optional_form_text(whisper_chunk_length_sec),
+        stt_silence_split=optional_form_text(stt_silence_split) or optional_form_text(whisper_silence_split),
+        stt_silence_sec=optional_form_text(stt_silence_sec) or optional_form_text(whisper_silence_sec),
         max_char_chunk_per_sentence=max_char_chunk_per_sentence,
         max_char_chunk=max_char_chunk,
         improve_max_chunk_chars=improve_max_chunk_chars,
@@ -846,6 +915,7 @@ def start_draft_project(
     custom_instructions: str = Form(""),
     tts_api: str = Form("openai"),
     translation_provider: str = Form("openai"),
+    stt_provider: str = Form(DEFAULT_STT_PROVIDER),
     elevenlabs_voice_id: str = Form(""),
     vibevoice_model: str = Form(""),
     vibevoice_cfg_scale: str = Form(""),
@@ -859,12 +929,16 @@ def start_draft_project(
     detailed_transcription: str = Form("true"),
     speaker_recognition: str = Form(""),
     number_of_speakers: str = Form(str(DEFAULT_NUMBER_OF_SPEAKERS)),
-    whisper_chunk_length_sec: str = Form(str(DEFAULT_WHISPER_CHUNK_LENGTH_SEC)),
-    whisper_silence_split: str = Form(""),
-    whisper_silence_sec: str = Form(str(DEFAULT_WHISPER_SILENCE_SEC)),
+    stt_chunk_length_sec: str = Form(""),
+    stt_silence_split: str = Form(""),
+    stt_silence_sec: str = Form(""),
     max_char_chunk_per_sentence: str = Form(str(DEFAULT_MAX_CHAR_CHUNK_PER_SENTENCE)),
     max_char_chunk: str = Form(str(DEFAULT_MAX_CHAR_CHUNK)),
     improve_max_chunk_chars: str = Form(str(DEFAULT_IMPROVE_MAX_CHUNK_CHARS)),
+    # Pre-rename field names, still accepted from scripted clients.
+    whisper_chunk_length_sec: str = Form(""),
+    whisper_silence_split: str = Form(""),
+    whisper_silence_sec: str = Form(""),
 ) -> dict[str, Any]:
     root = project_path(project_id)
     status = read_json(root / "status.json", {})
@@ -892,6 +966,7 @@ def start_draft_project(
         custom_instructions=custom_instructions,
         tts_api=tts_api,
         translation_provider=translation_provider,
+        stt_provider=stt_provider,
         elevenlabs_voice_id=elevenlabs_voice_id,
         vibevoice_model=vibevoice_model,
         vibevoice_cfg_scale=vibevoice_cfg_scale,
@@ -905,9 +980,9 @@ def start_draft_project(
         detailed_transcription=detailed_transcription,
         speaker_recognition=speaker_recognition,
         number_of_speakers=number_of_speakers,
-        whisper_chunk_length_sec=whisper_chunk_length_sec,
-        whisper_silence_split=whisper_silence_split,
-        whisper_silence_sec=whisper_silence_sec,
+        stt_chunk_length_sec=optional_form_text(stt_chunk_length_sec) or optional_form_text(whisper_chunk_length_sec),
+        stt_silence_split=optional_form_text(stt_silence_split) or optional_form_text(whisper_silence_split),
+        stt_silence_sec=optional_form_text(stt_silence_sec) or optional_form_text(whisper_silence_sec),
         max_char_chunk_per_sentence=max_char_chunk_per_sentence,
         max_char_chunk=max_char_chunk,
         improve_max_chunk_chars=improve_max_chunk_chars,

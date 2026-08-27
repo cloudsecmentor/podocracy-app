@@ -54,9 +54,10 @@ class BemaDraftWorkflowTests(unittest.TestCase):
                 detailed_transcription="true",
                 speaker_recognition="true",
                 number_of_speakers="2",
-                whisper_chunk_length_sec="300",
-                whisper_silence_split="",
-                whisper_silence_sec="2",
+                stt_provider="openai",
+                stt_chunk_length_sec="300",
+                stt_silence_split="",
+                stt_silence_sec="2",
                 max_char_chunk_per_sentence="200",
                 max_char_chunk="400",
                 improve_max_chunk_chars="12000",
@@ -142,9 +143,10 @@ class VibeVoiceProviderTests(unittest.TestCase):
             detailed_transcription="true",
             speaker_recognition="",
             number_of_speakers="2",
-            whisper_chunk_length_sec="300",
-            whisper_silence_split="",
-            whisper_silence_sec="2",
+            stt_provider="openai",
+            stt_chunk_length_sec="300",
+            stt_silence_split="",
+            stt_silence_sec="2",
             max_char_chunk_per_sentence="200",
             max_char_chunk="400",
             improve_max_chunk_chars="12000",
@@ -230,6 +232,172 @@ class VibeVoiceProviderTests(unittest.TestCase):
                 api.vibevoice_voices()
         self.assertEqual(caught.exception.status_code, 503)
         self.assertIn("http or https", caught.exception.detail)
+
+
+class SttProviderTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        api.PROJECTS_DIR = Path(self.temp_dir.name)
+
+    def build_payload(self, **overrides):
+        kwargs = dict(
+            filename="source.mp3",
+            language="RU",
+            voice="alloy",
+            stage_preset="voiceover",
+            stages_to_run="transcribe+translate+improve+voiceover",
+            custom_instructions="",
+            tts_api="openai",
+            translation_provider="openai",
+            stt_provider="openai",
+            elevenlabs_voice_id="",
+            voiceover_tempo="1.2",
+            voiceover_shift="1.5",
+            normalize_final_audio="",
+            max_preview_size_mb="2",
+            use_subtitles_as_is="",
+            autogenerate_custom_instructions="",
+            detailed_transcription="true",
+            speaker_recognition="",
+            number_of_speakers="2",
+            stt_chunk_length_sec="300",
+            stt_silence_split="",
+            stt_silence_sec="2",
+            max_char_chunk_per_sentence="200",
+            max_char_chunk="400",
+            improve_max_chunk_chars="12000",
+        )
+        kwargs.update(overrides)
+        return api.build_configured_project_payload(**kwargs)
+
+    def test_unpassed_provider_field_falls_back_to_the_default(self) -> None:
+        # Called directly (tests, scripts), an omitted Form field is the Form object.
+        self.assertEqual(api.parse_stt_provider(api.Form(api.DEFAULT_STT_PROVIDER)), "openai")
+
+    def test_parse_stt_provider_accepts_supported_names_and_legacy_spellings(self) -> None:
+        self.assertEqual(api.parse_stt_provider("openai"), "openai")
+        self.assertEqual(api.parse_stt_provider("Local-Whisper"), "local-whisper")
+        self.assertEqual(api.parse_stt_provider("whisper-api"), "openai")
+        self.assertEqual(api.parse_stt_provider(""), "openai")
+        with self.assertRaisesRegex(api.HTTPException, "stt_provider must be one of"):
+            api.parse_stt_provider("google")
+
+    def test_provider_is_persisted_with_a_legacy_mirror(self) -> None:
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False):
+            params, metadata = self.build_payload()
+        self.assertEqual(params["stt_provider"], "openai")
+        self.assertTrue(params["whisper_api"])
+        self.assertEqual(metadata["stt_provider"], "openai")
+
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False):
+            params, metadata = self.build_payload(stt_provider="local-whisper")
+        self.assertEqual(params["stt_provider"], "local-whisper")
+        self.assertFalse(params["whisper_api"])
+        self.assertEqual(metadata["stt_provider"], "local-whisper")
+
+    def test_chunking_params_are_stored_under_generalized_names(self) -> None:
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False):
+            params, _ = self.build_payload(stt_chunk_length_sec="120", stt_silence_split="true", stt_silence_sec="3")
+        self.assertEqual(params["stt_chunk_length_sec"], 120)
+        self.assertTrue(params["stt_silence_split"])
+        self.assertEqual(params["stt_silence_sec"], 3.0)
+
+    def test_local_whisper_transcribe_does_not_require_an_openai_key(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("OPENAI_API_KEY", None)
+            params, _ = self.build_payload(
+                stt_provider="local-whisper",
+                stages_to_run="transcribe",
+            )
+        self.assertEqual(params["stt_provider"], "local-whisper")
+
+    def test_openai_key_is_still_required_for_stages_that_use_openai(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("OPENAI_API_KEY", None)
+            with self.assertRaisesRegex(api.HTTPException, "OPENAI_API_KEY is required for these stages: transcribe"):
+                self.build_payload(stages_to_run="transcribe")
+            with self.assertRaisesRegex(api.HTTPException, "OPENAI_API_KEY is required for these stages: translate"):
+                self.build_payload(stt_provider="local-whisper", stages_to_run="translate")
+            with self.assertRaisesRegex(api.HTTPException, "OPENAI_API_KEY is required for these stages: voiceover"):
+                self.build_payload(stt_provider="local-whisper", stages_to_run="voiceover", tts_api="openai")
+
+    def test_openai_stages_lists_only_the_stages_that_call_openai(self) -> None:
+        self.assertEqual(
+            api.openai_stages(
+                "transcribe+translate+improve+voiceover",
+                stt_provider="local-whisper",
+                translation_provider="deepl",
+                tts_api="elevenlabs",
+            ),
+            ["improve"],
+        )
+        self.assertEqual(
+            api.openai_stages(
+                "transcribe+translate+voiceover",
+                stt_provider="openai",
+                translation_provider="openai",
+                tts_api="openai",
+            ),
+            ["transcribe", "translate", "voiceover"],
+        )
+
+    def test_local_whisper_is_reported_as_an_available_provider(self) -> None:
+        self.assertTrue(api.provider_status()["local-whisper"])
+
+
+class LegacyProjectCompatibilityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        api.PROJECTS_DIR = Path(self.temp_dir.name)
+
+    def test_pre_rename_whisper_form_fields_are_still_accepted(self) -> None:
+        root = api.PROJECTS_DIR / "project-legacy"
+        (root / "input").mkdir(parents=True)
+        (root / "config").mkdir(parents=True)
+        (root / "input" / "source.mp3").write_bytes(b"audio")
+        api.write_json(root / "metadata.json", {"source_path": "input/source.mp3"})
+        api.write_json(root / "status.json", {"state": "draft"})
+
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False):
+            api.start_draft_project(
+                project_id="project-legacy",
+                subtitle_file=None,
+                custom_recordings=None,
+                language="RU",
+                voice="alloy",
+                stage_preset="voiceover",
+                stages_to_run="transcribe",
+                custom_instructions="",
+                tts_api="openai",
+                translation_provider="openai",
+                stt_provider="openai",
+                elevenlabs_voice_id="",
+                voiceover_tempo="1.2",
+                voiceover_shift="1.5",
+                normalize_final_audio="",
+                max_preview_size_mb="2",
+                use_subtitles_as_is="",
+                autogenerate_custom_instructions="",
+                detailed_transcription="true",
+                speaker_recognition="",
+                number_of_speakers="2",
+                stt_chunk_length_sec="",
+                stt_silence_split="",
+                stt_silence_sec="",
+                max_char_chunk_per_sentence="200",
+                max_char_chunk="400",
+                improve_max_chunk_chars="12000",
+                whisper_chunk_length_sec="150",
+                whisper_silence_split="true",
+                whisper_silence_sec="4",
+            )
+
+        params = json.loads((root / "config" / "params.json").read_text(encoding="utf-8"))
+        self.assertEqual(params["stt_chunk_length_sec"], 150)
+        self.assertTrue(params["stt_silence_split"])
+        self.assertEqual(params["stt_silence_sec"], 4.0)
 
 
 if __name__ == "__main__":

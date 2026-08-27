@@ -1,67 +1,14 @@
 from shared_functions import *
 from speaker_diarization import assign_speakers_to_words, diarize_speakers
+from stt.schema import iter_transcript_words, replace_transcript_words
 
 
 def get_words_timings_from_raw(transcript_raw):
-    words_start = []
-    for chunk in transcript_raw["segments"]:
-        words_start += split_text_to_words_with_start_time(chunk)
-        # print(split_text_to_words_with_start_time (chunk))
-    return words_start
+    """Words of a canonical transcript, whichever provider produced it.
 
-
-def split_text_to_words_with_start_time(chunk) -> dict: 
-    """ 
-    expect the following structure of the chunk:
-{
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "type": "object",
-  "properties": {
-    "id": { "type": "integer" },
-    "seek": { "type": "integer" },
-    "start": { "type": "number" },
-    "end": { "type": "number" },
-    "text": { "type": "string" },
-    "tokens": {
-      "type": "array",
-      "items": { "type": "integer" }
-    },
-    "temperature": { "type": "number" },
-    "avg_logprob": { "type": "number" },
-    "compression_ratio": { "type": "number" },
-    "no_speech_prob": { "type": "number" },
-    "words": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "word": { "type": "string" },
-          "start": { "type": "number" },
-          "end": { "type": "number" },
-          "probability": { "type": "number" }
-        },
-        "required": ["word", "start", "end", "probability"]
-      }
-    }
-  },
-  "required": ["id", "seek", "start", "end", "text", "tokens", "temperature", "avg_logprob", "compression_ratio", "no_speech_prob", "words"]
-}
-
+    Legacy raw files that only carry per-segment words still read correctly.
     """
-
-    words_with_time = []
-    for i, word in enumerate(chunk["words"]):
-        word_data = {
-            "word": word["word"].strip(),
-            "start": word["start"],
-            "end": word["end"],
-        }
-        if word.get("speaker") is not None:
-            word_data["speaker"] = word["speaker"]
-        words_with_time.append(word_data)
-
-    return words_with_time
-
+    return iter_transcript_words(transcript_raw)
 
 
 def split_text_to_words_with_start_time_old_based_on_chunk_timeings(chunk):
@@ -121,8 +68,8 @@ def main(path):
             number_of_speakers,
             logging.getLogger(__name__),
         )
-        for segment in transcript_raw.get("segments", []):
-            segment["words"] = assign_speakers_to_words(segment.get("words", []), speaker_turns)
+        words_with_speakers = assign_speakers_to_words(iter_transcript_words(transcript_raw), speaker_turns)
+        replace_transcript_words(transcript_raw, words_with_speakers)
         transcript_raw["speaker_diarization"] = speaker_turns
         save_json_with_upload(path_raw, transcript_raw)
         save_json_with_upload(

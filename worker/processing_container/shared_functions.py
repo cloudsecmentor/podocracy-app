@@ -12,7 +12,10 @@ import sys
 import os
 import requests
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))) # to access common functions
+# Worker root (parent of this package) exposes `common` and `stt`; the extra level up
+# keeps the older layout working when the scripts are run from a checkout.
+for _extra_path in ('..', '../..'):
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), _extra_path)))
 from common.shared_functions_common import get_common_parameters, is_supported_file_type
 
 
@@ -357,8 +360,8 @@ def naming_convention(path, file_type):
             return f"{path_without_ext}.raw.json"
         case "diarization":
             return f"{path_without_ext}.diarization.json"
-        case "whisper-api-transcribe":
-            return f"{path_without_ext}.whisperapitranscribe.json"
+        case "stt_provider_response":
+            return f"{path_without_ext}.stt-provider-response.json"
         case "proofread":
             return f"{path_without_ext}.proofread.txt"
         case "timesync": # this is to be used only for troubleshooting
@@ -508,6 +511,21 @@ def get_params(parameter, path=None, processing_parameters_path='backend/process
     else:
         raise ValueError(f"Unsupported parameter [{parameter}]")
 
+
+
+def get_all_params(path=None, processing_parameters_path='backend/processing_container/parameters.json'):
+    """All parameters as plain values: parameters.json defaults, overridden by the project's params file."""
+    with open(processing_parameters_path, 'r') as file:
+        default_params = json.load(file)
+
+    merged = {}
+    for key, entry in default_params.items():
+        merged[key] = entry["value"] if isinstance(entry, dict) and "value" in entry else entry
+
+    if path:
+        merged.update(read_project_params(path))
+
+    return merged
 
 
 def read_project_params(path):

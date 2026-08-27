@@ -14,12 +14,19 @@ from typing import Any
 from urllib.parse import urlparse
 
 import requests
-from pydub import AudioSegment, silence
+from pydub import AudioSegment
 from processing_container.speaker_diarization import (
     DEFAULT_PYANNOTE_MODEL,
     assign_speakers_to_words,
     diarize_speakers,
 )
+from stt import (
+    TranscriptionRequest,
+    create_stt_provider,
+    resolve_stt_provider_name,
+    validate_transcript,
+)
+from stt.schema import iter_transcript_words, replace_transcript_words
 
 
 WORKER_VERSION = "local-worker-0.4.0"
@@ -186,16 +193,6 @@ def ensure_mp3(source: Path, work_dir: Path, logger: logging.Logger) -> Path:
     return mp3_path
 
 
-def model_dump(value: Any) -> dict[str, Any]:
-    if isinstance(value, dict):
-        return value
-    if hasattr(value, "model_dump"):
-        return value.model_dump()
-    if hasattr(value, "to_dict"):
-        return value.to_dict()
-    return json.loads(value.model_dump_json())
-
-
 def get_timing_format(max_end_seconds: float) -> str:
     return "hhmmss" if max_end_seconds > 6000 else "mmss"
 
@@ -241,90 +238,6 @@ def param_float(params: dict[str, Any], key: str, default: float) -> float:
         return float(params.get(key, default))
     except (TypeError, ValueError):
         return default
-
-
-def split_audio_ranges(audio: AudioSegment, params: dict[str, Any], logger: logging.Logger) -> list[tuple[int, int]]:
-    chunk_length_sec = param_int(params, "whisper_chunk_length_sec", 300)
-    silence_sec = param_float(params, "whisper_silence_sec", 2.0)
-    max_chunk_ms = max(1000, chunk_length_sec * 1000)
-    min_chunk_ms = max(500, int(0.5 * max_chunk_ms))
-    use_silence = parse_legacy_bool(params.get("whisper_silence_split", False))
-
-    if len(audio) <= max_chunk_ms and not use_silence:
-        return [(0, len(audio))]
-
-    if not use_silence:
-        return [(start, min(start + max_chunk_ms, len(audio))) for start in range(0, len(audio), max_chunk_ms)]
-
-    logger.info("Splitting transcription audio on silence: chunk=%ss silence=%ss", chunk_length_sec, silence_sec)
-    silence_segments = silence.detect_silence(audio, min_silence_len=int(silence_sec * 1000), silence_thresh=-40)
-    if not silence_segments:
-        return [(start, min(start + max_chunk_ms, len(audio))) for start in range(0, len(audio), max_chunk_ms)]
-
-    ranges: list[tuple[int, int]] = []
-    current_position = 0
-    for start, end in silence_segments:
-        middle = (start + end) // 2
-        chunk_length = middle - current_position
-        if min_chunk_ms <= chunk_length <= max_chunk_ms:
-            ranges.append((current_position, middle))
-            current_position = middle
-        elif chunk_length > max_chunk_ms:
-            while current_position + max_chunk_ms < middle:
-                next_position = current_position + max_chunk_ms
-                ranges.append((current_position, next_position))
-                current_position = next_position
-            if current_position < middle:
-                ranges.append((current_position, middle))
-                current_position = middle
-
-    while current_position + max_chunk_ms < len(audio):
-        next_position = current_position + max_chunk_ms
-        ranges.append((current_position, next_position))
-        current_position = next_position
-    if current_position < len(audio):
-        ranges.append((current_position, len(audio)))
-    return ranges or [(0, len(audio))]
-
-
-def collect_word_entries(data: dict[str, Any], offset_seconds: float = 0.0) -> list[dict[str, Any]]:
-    raw_words: list[dict[str, Any]] = []
-    if data.get("words"):
-        raw_words.extend(data.get("words") or [])
-    for segment in data.get("segments") or []:
-        raw_words.extend(segment.get("words") or [])
-
-    words: list[dict[str, Any]] = []
-    for entry in raw_words:
-        word = str(entry.get("word") or "").strip()
-        if not word:
-            continue
-        start = float(entry.get("start", entry.get("end", 0.0))) + offset_seconds
-        end = float(entry.get("end", entry.get("start", start))) + offset_seconds
-        words.append({"word": word, "start": start, "end": end})
-    return words
-
-
-def words_from_segments(data: dict[str, Any], offset_seconds: float = 0.0) -> list[dict[str, Any]]:
-    words: list[dict[str, Any]] = []
-    for segment in data.get("segments") or []:
-        text = str(segment.get("text") or "").strip()
-        if not text:
-            continue
-        start = float(segment.get("start", 0.0)) + offset_seconds
-        end = float(segment.get("end", start)) + offset_seconds
-        parts = [part for part in text.split() if part]
-        duration = max(0.0, end - start)
-        step = duration / len(parts) if parts else 0
-        for index, word in enumerate(parts):
-            words.append(
-                {
-                    "word": word,
-                    "start": start + index * step,
-                    "end": start + (index + 1) * step if index < len(parts) - 1 else end,
-                }
-            )
-    return words
 
 
 def combine_words_to_sentences_local(words: list[dict[str, Any]], params: dict[str, Any]) -> list[dict[str, Any]]:
@@ -442,69 +355,39 @@ def combine_sentences_to_chunks_local(sentences: list[dict[str, Any]], params: d
     return chunks
 
 
+def transcription_provider(params: dict[str, Any]):
+    """Provider selected by the project, migrating legacy ``whisper_api`` params."""
+    return create_stt_provider(resolve_stt_provider_name(params))
+
+
 def transcribe(source_mp3: Path, params: dict[str, Any], project: Path, logger: logging.Logger) -> list[dict[str, Any]]:
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is not set")
+    provider = transcription_provider(params)
+    logger.info("Transcribing with provider %s model %s", provider.name, provider.resolve_model(params))
 
-    from openai import OpenAI
+    result = provider.transcribe(
+        TranscriptionRequest(
+            audio_path=source_mp3,
+            params=params,
+            language=str(params.get("source_language") or "") or None,
+            work_dir=project / "work",
+            logger=logger,
+        )
+    )
 
-    client = OpenAI(api_key=api_key)
-    model = os.getenv("OPENAI_TRANSCRIBE_MODEL", "whisper-1")
-    detailed = parse_legacy_bool(params.get("detailed_transcription", True))
-    logger.info("Transcribing with OpenAI model %s detailed=%s", model, detailed)
+    raw = validate_transcript(result.transcript.to_dict())
+    # The untouched provider payload stays in its own file, so source.raw.json holds
+    # only the normalized transcript every later stage reads.
+    provider_response_path = project / "work" / "source.stt-provider-response.json"
+    write_json(provider_response_path, result.provider_response)
+    raw["provider_response_path"] = provider_response_path.name
 
-    audio = AudioSegment.from_file(source_mp3)
-    ranges = split_audio_ranges(audio, params, logger)
-    chunk_dir = project / "work" / "transcription-chunks"
-    chunk_dir.mkdir(parents=True, exist_ok=True)
-
-    raw_chunks: list[dict[str, Any]] = []
-    all_words: list[dict[str, Any]] = []
-    all_segments: list[dict[str, Any]] = []
-    text_parts: list[str] = []
-
-    for index, (start_ms, end_ms) in enumerate(ranges):
-        chunk_path = chunk_dir / f"chunk-{index:04d}-{start_ms}-{end_ms}.mp3"
-        audio[start_ms:end_ms].export(chunk_path, format="mp3", bitrate="192k")
-        with chunk_path.open("rb") as audio_file:
-            try:
-                transcript = client.audio.transcriptions.create(
-                    model=model,
-                    file=audio_file,
-                    response_format="verbose_json",
-                    timestamp_granularities=["word"] if detailed else ["segment"],
-                )
-            except TypeError:
-                audio_file.seek(0)
-                transcript = client.audio.transcriptions.create(
-                    model=model,
-                    file=audio_file,
-                    response_format="verbose_json",
-                )
-
-        offset_seconds = start_ms / 1000.0
-        data = model_dump(transcript)
-        text_parts.append(str(data.get("text") or "").strip())
-        raw_chunks.append({"start_ms": start_ms, "end_ms": end_ms, "transcript": data})
-        words = collect_word_entries(data, offset_seconds) if detailed else []
-        if not words:
-            words = words_from_segments(data, offset_seconds)
-        all_words.extend(words)
-
-        for segment in data.get("segments") or []:
-            item = dict(segment)
-            item["start"] = float(item.get("start", 0.0)) + offset_seconds
-            item["end"] = float(item.get("end", item["start"])) + offset_seconds
-            all_segments.append(item)
-        logger.info("Transcribed chunk %s/%s with %s words", index + 1, len(ranges), len(words))
-
-    all_words.sort(key=lambda item: (float(item.get("start", 0.0)), float(item.get("end", 0.0))))
+    all_words = iter_transcript_words(raw)
     speaker_turns: list[dict[str, Any]] = []
     if parse_legacy_bool(params.get("speaker_recognition", False)):
         number_of_speakers = max(1, min(20, param_int(params, "number_of_speakers", 2)))
         speaker_turns = diarize_speakers(source_mp3, number_of_speakers, logger)
         all_words = assign_speakers_to_words(all_words, speaker_turns)
+        replace_transcript_words(raw, all_words)
         write_json(
             project / "work" / "source.diarization.json",
             {
@@ -513,14 +396,8 @@ def transcribe(source_mp3: Path, params: dict[str, Any], project: Path, logger: 
                 "turns": speaker_turns,
             },
         )
-    raw = {
-        "text": " ".join(part for part in text_parts if part).strip(),
-        "segments": [{"words": all_words}],
-        "raw_segments": all_segments,
-        "chunks": raw_chunks,
-    }
-    if speaker_turns:
         raw["speaker_diarization"] = speaker_turns
+
     write_json(project / "work" / "source.raw.json", raw)
 
     if all_words:
@@ -529,8 +406,9 @@ def transcribe(source_mp3: Path, params: dict[str, Any], project: Path, logger: 
     else:
         cleaned = []
 
-    if not cleaned and raw["text"]:
-        duration = audio.duration_seconds
+    text = str(raw.get("text") or "")
+    if not cleaned and text:
+        duration = float(raw.get("duration") or 0.0) or AudioSegment.from_file(source_mp3).duration_seconds
         timing_format = get_timing_format(duration)
         cleaned = [
             {
@@ -539,12 +417,12 @@ def transcribe(source_mp3: Path, params: dict[str, Any], project: Path, logger: 
                 "end": seconds_to_timecode(duration, timing_format),
                 "start_seconds": 0.0,
                 "end_seconds": duration,
-                "text": raw["text"],
+                "text": text,
             }
         ]
 
     write_json(project / "work" / "source.combined.json", cleaned)
-    (project / "output" / "source.transcript.txt").write_text(raw["text"], encoding="utf-8")
+    (project / "output" / "source.transcript.txt").write_text(text, encoding="utf-8")
     return cleaned
 
 
@@ -1481,9 +1359,9 @@ def process_project(project: Path) -> None:
         "worker_version": WORKER_VERSION,
         "created_at": now_iso(),
         "provider_selection": {
-            "transcription": "openai",
-            "translation": "openai",
-            "tts": "openai",
+            "transcription": resolve_stt_provider_name(params),
+            "translation": str(params.get("translation_provider") or "openai").lower(),
+            "tts": str(params.get("tts_api") or "openai").lower(),
         },
         "stages": [],
         "artifacts": [],

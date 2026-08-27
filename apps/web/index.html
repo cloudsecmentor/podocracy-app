@@ -64,6 +64,15 @@
             </label>
 
             <label>
+              Transcription engine
+              <select name="stt_provider" id="stt-engine">
+                <option value="openai" selected>OpenAI Whisper API</option>
+                <option value="local-whisper">Local Whisper (in worker)</option>
+              </select>
+              <span class="muted" id="stt-engine-hint"></span>
+            </label>
+
+            <label>
               Voiceover engine
               <select name="tts_api" id="tts-engine">
                 <option value="openai" selected>OpenAI</option>

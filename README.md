@@ -69,7 +69,7 @@ cd "$HOME/podocracy-worker-portal"
 
 Create your `.env` by copying [.env.example](.env.example), then fill in at least:
 
-- `OPENAI_API_KEY` (required) — get one at [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
+- `OPENAI_API_KEY` (required for the OpenAI transcription, translation, improvement, and TTS paths) — get one at [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
 - `PORTAL_ADMIN_PASSWORD` (strongly recommended whenever the portal is reachable from other machines)
 - `HF_TOKEN` (optional) — required only for local speaker recognition. Accept the
   [pyannote Community-1 terms](https://huggingface.co/pyannote/speaker-diarization-community-1)
@@ -91,7 +91,24 @@ docker compose -f docker-compose.images.yml up -d
 
 Open `http://localhost:8080`.
 
-First startup can take a while: Docker may pull large images, and the worker may spend extra time caching Whisper artifacts before the first job completes.
+First startup can take a while: Docker may pull large images, and the worker may spend extra time caching transcription artifacts before the first job completes.
+
+### Transcription providers
+
+The **Transcription engine** picker on the new-project form selects the speech-to-text provider:
+
+| Provider | `stt_provider` | Needs |
+| --- | --- | --- |
+| OpenAI Whisper API | `openai` | `OPENAI_API_KEY` |
+| Local Whisper | `local-whisper` | Nothing; Whisper runs inside the worker and is installed on first use |
+
+Whichever provider runs, the transcribe stage writes the same normalized transcript to
+`work/source.raw.json`, and every later stage reads only that. The untouched provider
+payload is kept beside it in `work/source.stt-provider-response.json`.
+
+Projects created before this setting existed carry the boolean `whisper_api` instead; it is
+still honoured (`true` -> `openai`, `false` -> `local-whisper`) and is still written alongside
+`stt_provider` so an older worker reads a new project correctly.
 
 ### One-click launch scripts
 
@@ -179,7 +196,9 @@ colima start
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `OPENAI_API_KEY` | empty | Required for OpenAI-backed transcription/TTS/translation paths. |
+| `OPENAI_API_KEY` | empty | Required only for the stages that use OpenAI: transcription with `stt_provider=openai`, OpenAI translation, improve/customize, and OpenAI TTS. |
+| `OPENAI_TRANSCRIBE_MODEL` | `whisper-1` | Model used by the `openai` transcription provider. |
+| `LOCAL_WHISPER_MODEL` | `small` | Default model for the `local-whisper` transcription provider when the project sets none. |
 | `DEEPL_AUTH_KEY` | empty | Enables DeepL translation provider. |
 | `ELEVENLABS_API_KEY` | empty | Enables ElevenLabs TTS provider. |
 | `VIBEVOICE_BASE_URL` | empty (`http://host.docker.internal:8000/v1` when enabled) | Root of a local OpenAI-compatible VibeVoice TTS server. Setting a value enables the provider. |

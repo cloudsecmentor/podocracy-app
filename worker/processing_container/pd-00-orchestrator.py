@@ -97,6 +97,7 @@ for path in sys.path:
 
 from common.shared_functions_common import is_supported_file_type
 from shared_functions import *
+from stt import STT_PROVIDER_LOCAL_WHISPER, resolve_stt_provider_name
 from portal_status import (
     append_portal_stage,
     fatal_stage_failures,
@@ -233,22 +234,21 @@ def main(path, time2sleep=0):
 
     logging.info(f"Current Directory: {current_directory}")
 
-    if not get_params("whisper_api", path=path): 
+    # The transcription model only has to be resolved here for providers that run a
+    # local model; API providers pick their own default from params or environment.
+    stt_provider = resolve_stt_provider_name(params, defaults=get_all_params(path=path))
+    stt_model = ""
+    if stt_provider == STT_PROVIDER_LOCAL_WHISPER:
         try:
-            if not params.get("whisper_model"):
-                whisper_model = get_params("whisper_default_model_local")
-            else:
-                whisper_model = params["whisper_model"]
+            stt_model = params.get("stt_model") or params.get("whisper_model") or get_params("stt_local_model")
         except Exception as e:
-            logging.error(f"Failed to get whisper model: {e}")
-    else:
-        whisper_model = "NA - using API"
-    logging.info(f"whisper model: {whisper_model}")
+            logging.error(f"Failed to get local transcription model: {e}")
+    logging.info(f"Transcription provider: [{stt_provider}], model: [{stt_model or 'provider default'}]")
 
 
     # List of script names and their arguments
     scripts = [
-        ("transcribe", f"{current_directory}/pd-010-raw-transcribe.py", ["-p", path, "-s", whisper_model]),
+        ("transcribe", f"{current_directory}/pd-010-raw-transcribe.py", ["-p", path, "-s", stt_model]),
         ("combine",    f"{current_directory}/pd-020-combine.py", ["-p", path]),
         ("timesync",   f"{current_directory}/pd-025-timesync.py", ["-p", path]),
         ("translate",  f"{current_directory}/pd-030-translate.py", ["-p", path]),
