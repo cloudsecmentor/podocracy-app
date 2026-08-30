@@ -41,10 +41,10 @@ function blankChunk(seed = {}) {
   };
 }
 
-function normalizeChunk(item) {
+function normalizeChunk(item, nextItem = null) {
   return {
     start: String(item.start ?? ""),
-    end: String(item.end ?? ""),
+    end: String(item.end ?? nextItem?.start ?? item.start ?? ""),
     speaker: String(item.speaker ?? ""),
     text: String(item.text ?? ""),
     imp: String(item.imp ?? ""),
@@ -52,7 +52,7 @@ function normalizeChunk(item) {
 }
 
 function isChunkArray(data) {
-  return Array.isArray(data) && data.every((item) => item && typeof item === "object" && "start" in item && "end" in item && "text" in item && "imp" in item);
+  return Array.isArray(data) && data.length > 0 && data.every((item) => item && typeof item === "object" && "start" in item && "text" in item && "imp" in item);
 }
 
 function serializeChunks(chunks) {
@@ -108,7 +108,7 @@ function loadImprovedBody(raw) {
   }
 
   if (isChunkArray(parsed)) {
-    state.chunks = parsed.map(normalizeChunk);
+    state.chunks = parsed.map((item, index) => normalizeChunk(item, parsed[index + 1]));
     state.rawFallback = null;
   } else {
     state.chunks = [];
