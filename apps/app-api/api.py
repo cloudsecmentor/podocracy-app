@@ -164,6 +164,10 @@ def is_improved_filename(filename: str) -> bool:
     return filename.endswith(".improved.json")
 
 
+def is_translated_filename(filename: str) -> bool:
+    return filename.endswith(".translated.json")
+
+
 def is_custom_instructions_filename(filename: str) -> bool:
     # Worker names these after the source stem, so match by suffix rather than an exact name.
     return filename.endswith(".custom-instructions.txt") or filename.endswith(
@@ -378,6 +382,8 @@ def build_project_payload(
     custom_instructions: str,
     tts_api: str,
     translation_provider: str = "openai",
+    translation_text_key: str = "dltrans",
+    resume_from_translated: bool = False,
     stt_provider: str = DEFAULT_STT_PROVIDER,
     elevenlabs_voice_id: str = "",
     vibevoice_model: str = "",
@@ -422,7 +428,8 @@ def build_project_payload(
         "whisper_api": parsed_stt_provider in OPENAI_STT_PROVIDERS,
         "tts_api": parsed_tts_api,
         "translation_provider": parsed_translation_provider,
-        "translation_text_key": "dltrans",
+        "translation_text_key": translation_text_key,
+        "resume_from_translated": resume_from_translated,
         "improved_text_key": "imp",
         "speedup_value": DEFAULT_SPEEDUP_VALUE,
         "normalize_final_audio": normalize_final_audio,
@@ -520,6 +527,8 @@ def build_configured_project_payload(
     custom_instructions: str,
     tts_api: str,
     translation_provider: str,
+    translation_text_key: str,
+    resume_from_translated: str,
     stt_provider: str,
     elevenlabs_voice_id: str,
     vibevoice_model: str = "",
@@ -595,6 +604,8 @@ def build_configured_project_payload(
         custom_instructions=custom_instructions,
         tts_api=parsed_tts_api,
         translation_provider=parsed_translation_provider,
+        translation_text_key=translation_text_key,
+        resume_from_translated=parse_optional_bool(resume_from_translated),
         stt_provider=parsed_stt_provider,
         elevenlabs_voice_id=elevenlabs_voice_id,
         vibevoice_model=vibevoice_model,
@@ -721,6 +732,8 @@ def create_project(
     custom_instructions: str = Form(""),
     tts_api: str = Form("openai"),
     translation_provider: str = Form("openai"),
+    translation_text_key: str = Form("dltrans"),
+    resume_from_translated: str = Form(""),
     stt_provider: str = Form(DEFAULT_STT_PROVIDER),
     elevenlabs_voice_id: str = Form(""),
     vibevoice_model: str = Form(""),
@@ -770,6 +783,8 @@ def create_project(
         custom_instructions=custom_instructions,
         tts_api=tts_api,
         translation_provider=translation_provider,
+        translation_text_key=translation_text_key,
+        resume_from_translated=resume_from_translated,
         stt_provider=stt_provider,
         elevenlabs_voice_id=elevenlabs_voice_id,
         vibevoice_model=vibevoice_model,
@@ -915,6 +930,8 @@ def start_draft_project(
     custom_instructions: str = Form(""),
     tts_api: str = Form("openai"),
     translation_provider: str = Form("openai"),
+    translation_text_key: str = Form("dltrans"),
+    resume_from_translated: str = Form(""),
     stt_provider: str = Form(DEFAULT_STT_PROVIDER),
     elevenlabs_voice_id: str = Form(""),
     vibevoice_model: str = Form(""),
@@ -966,6 +983,8 @@ def start_draft_project(
         custom_instructions=custom_instructions,
         tts_api=tts_api,
         translation_provider=translation_provider,
+        translation_text_key=translation_text_key,
+        resume_from_translated=resume_from_translated,
         stt_provider=stt_provider,
         elevenlabs_voice_id=elevenlabs_voice_id,
         vibevoice_model=vibevoice_model,
@@ -989,6 +1008,8 @@ def start_draft_project(
         subtitle_relative=subtitle_relative,
         custom_recordings_relative=custom_recordings_relative,
     )
+    if params["stages_to_run"] == "voiceover" and improved_artifact_for_project(root) is not None:
+        params["resume_from_improved"] = True
     if subtitle_name:
         subtitle_path = root / "input" / subtitle_name
         assert subtitle_file is not None
@@ -1028,7 +1049,11 @@ def start_draft_project(
 def get_project_file(project_id: str, filename: str) -> PlainTextResponse:
     root = project_path(project_id)
     safe_filename = safe_name(filename)
-    if not (is_improved_filename(safe_filename) or is_custom_instructions_filename(safe_filename)):
+    if not (
+        is_improved_filename(safe_filename)
+        or is_translated_filename(safe_filename)
+        or is_custom_instructions_filename(safe_filename)
+    ):
         raise HTTPException(status_code=404, detail="File not editable")
     path = None
     for directory in ("work", "output", "input"):
@@ -1047,7 +1072,7 @@ def get_project_file(project_id: str, filename: str) -> PlainTextResponse:
 def save_project_file(project_id: str, filename: str, body: FileContentUpdateRequest) -> dict[str, Any]:
     root = project_path(project_id)
     safe_filename = safe_name(filename)
-    if not is_improved_filename(safe_filename):
+    if not (is_improved_filename(safe_filename) or is_translated_filename(safe_filename)):
         raise HTTPException(status_code=404, detail="File not editable")
     path = None
     for directory in ("work", "output", "input"):
@@ -1059,9 +1084,15 @@ def save_project_file(project_id: str, filename: str, body: FileContentUpdateReq
         path = root / "work" / safe_filename
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body.content, encoding="utf-8")
-    work_canonical = root / "work" / "source.improved.json"
-    work_canonical.parent.mkdir(parents=True, exist_ok=True)
-    work_canonical.write_text(body.content, encoding="utf-8")
+    source_path = source_path_for_project(root)
+    if is_improved_filename(safe_filename):
+        work_canonical = root / "work" / "source.improved.json"
+        work_canonical.parent.mkdir(parents=True, exist_ok=True)
+        work_canonical.write_text(body.content, encoding="utf-8")
+        if source_path is not None:
+            source_path.with_suffix(".improved.json").write_text(body.content, encoding="utf-8")
+    elif is_translated_filename(safe_filename) and source_path is not None:
+        source_path.with_suffix(".translated.json").write_text(body.content, encoding="utf-8")
     return {"ok": True, "filename": safe_filename}
 
 
@@ -1120,10 +1151,11 @@ def start_voiceover(project_id: str) -> dict[str, Any]:
     improved_path = improved_artifact_for_project(root) or (root / "work" / "source.improved.json")
     if not improved_path.exists():
         raise HTTPException(status_code=400, detail="Improved transcript is missing")
+    improved_content = improved_path.read_text(encoding="utf-8")
     canonical_improved = root / "work" / "source.improved.json"
     canonical_improved.parent.mkdir(parents=True, exist_ok=True)
     if improved_path != canonical_improved:
-        canonical_improved.write_text(improved_path.read_text(encoding="utf-8"), encoding="utf-8")
+        canonical_improved.write_text(improved_content, encoding="utf-8")
 
     params = read_json(root / "config" / "params.json", {})
     params["stage_preset"] = "voiceover"
@@ -1132,6 +1164,7 @@ def start_voiceover(project_id: str) -> dict[str, Any]:
     write_json(root / "config" / "params.json", params)
     source_path = source_path_for_project(root)
     if source_path is not None:
+        source_path.with_suffix(".improved.json").write_text(improved_content, encoding="utf-8")
         write_json(source_path.with_suffix(".params.json"), params)
     status = {
         "project_id": project_id,
