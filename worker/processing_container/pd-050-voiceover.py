@@ -42,13 +42,13 @@ def get_voice_name(path):
     before_sleep=before_sleep_log(logging, logging.INFO)
 )
 def generate_openai_tts(path, text, speech_file_path, voice):
-    tts_api = str(get_params("tts_api") or "openai").lower()
+    tts_api = str(get_params("tts_api", path=path) or "openai").lower()
     if tts_api == "elevenlabs":
         logging.info(f"Using ElevenLabs TTS API for {speech_file_path}")
         return tts_elevenlabs(text, speech_file_path)
     if tts_api == "vibevoice":
         logging.info(f"Using local VibeVoice TTS server for {speech_file_path}")
-        return tts_vibevoice(text, speech_file_path, voice)
+        return tts_vibevoice(path, text, speech_file_path, voice)
 
     from openai import OpenAI
     import os
@@ -69,7 +69,35 @@ def generate_openai_tts(path, text, speech_file_path, voice):
     return None
 
 
-def tts_vibevoice(text: str, speech_file_path: str, voice: str) -> None:
+def check_vibevoice_server(path):
+    import os
+    import requests
+
+    base_url = (os.getenv("VIBEVOICE_BASE_URL") or "").strip().rstrip("/")
+    if not base_url:
+        raise RuntimeError("VIBEVOICE_BASE_URL is not set. Configure the VibeVoice server before starting voiceover.")
+
+    health_urls = [f"{base_url}/health"]
+    if base_url.endswith("/v1"):
+        health_urls.append(f"{base_url[:-3]}/health")
+    last_error = "unknown error"
+    for health_url in health_urls:
+        try:
+            response = requests.get(health_url, timeout=(5, 5))
+            if response.ok:
+                logging.info(f"VibeVoice server is reachable at {base_url}")
+                return
+            last_error = f"HTTP {response.status_code}"
+        except requests.RequestException as error:
+            last_error = str(error)
+
+    raise RuntimeError(
+        f"VibeVoice server is not reachable at {base_url} ({last_error}). "
+        "Start the VibeVoice server and retry voiceover."
+    )
+
+
+def tts_vibevoice(path: str, text: str, speech_file_path: str, voice: str) -> None:
     """Local, OpenAI-compatible TTS server. This legacy path writes .ogg, so ask the
     server for ogg rather than the mp3 the portal worker requests."""
     import os
@@ -90,7 +118,7 @@ def tts_vibevoice(text: str, speech_file_path: str, voice: str) -> None:
     def param(name):
         # get_params raises on an older parameters.json that predates these keys.
         try:
-            return get_params(name)
+            return get_params(name, path=path)
         except Exception:
             return ""
 
@@ -354,7 +382,7 @@ def tts(episode, temp_dir, path):
         if chunk[transName]:
             generate_openai_tts(path = path, text=chunk[transName], speech_file_path= audio_file_path, voice=voice)
         else:
-            logging.info(f"Empty text in chunk {chunk['start']}-{chunk['end']}")
+            logging.info(f"Empty text in chunk starting at {chunk.get('start', '')}")
         # we will not normalize here - we will normilize the final file
         # normalize_and_limit_audio(audio_file_path, audio_file_path)
     
@@ -1043,6 +1071,9 @@ def main(path, existing_dir=None):
         temp_dir = existing_dir
         logging.info(f"Generated audio found in directory [{temp_dir}]")
     else:
+
+        if str(project_params.get("tts_api") or "openai").lower() == "vibevoice":
+            check_vibevoice_server(path)
 
         path_improved = naming_convention(path, "improved")
         import json
