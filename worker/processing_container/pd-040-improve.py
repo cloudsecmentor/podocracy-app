@@ -307,7 +307,7 @@ def main(path):
     logging.info(f"Improving translation of file : [{path_translated}]")
     transcript_improved = improve_text_openai (
         episode=transcript_translated, 
-        key_name=get_params("translation_text_key"), 
+        key_name=get_params("translation_text_key", path=path),
         improved_text_key = get_params("improved_text_key"),
         custom_instructions = custom_instructions,
         caffeinate= not file_from_sta(path))

@@ -272,14 +272,18 @@ def main(path, time2sleep=0):
 
     stages_list = stages.split("+")
     stages_set = set(stages_list)
+    resume_from_improved = parse_legacy_bool(params.get("resume_from_improved", False))
+    resume_from_translated = parse_legacy_bool(params.get("resume_from_translated", False))
     if stages != "all":
         if parse_legacy_bool(params.get("speaker_recognition", False)) and "transcribe" in stages_set:
             stages_set.add("combine")
-        if stages_set & {"translate", "improve", "voiceover"}:
+        if (stages_set & {"translate", "improve"} and not resume_from_translated) or (
+            "voiceover" in stages_set and not resume_from_improved and not resume_from_translated
+        ):
             stages_set.update({"combine", "timesync"})
         if "improve" in stages_set:
             stages_set.add("customize")
-        if "voiceover" in stages_set:
+        if "voiceover" in stages_set and not resume_from_improved and not resume_from_translated:
             stages_set.update({"improve", "translate"})
     logging.info(f"Stages to execute: {stages_list}")
 

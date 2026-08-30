@@ -31,7 +31,7 @@ class BemaDraftWorkflowTests(unittest.TestCase):
         ):
             return api.import_bema_episode(api.ImportBemaEpisodeRequest(episode=34))
 
-    def start_project(self, project_id: str) -> dict:
+    def start_project(self, project_id: str, stages_to_run: str = "translate+improve") -> dict:
         with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}):
             return api.start_draft_project(
                 project_id=project_id,
@@ -40,7 +40,7 @@ class BemaDraftWorkflowTests(unittest.TestCase):
                 language="RU",
                 voice="coral",
                 stage_preset="voiceover",
-                stages_to_run="translate+improve",
+                stages_to_run=stages_to_run,
                 custom_instructions="Keep names unchanged.",
                 tts_api="openai",
                 translation_provider="openai",
@@ -93,6 +93,26 @@ class BemaDraftWorkflowTests(unittest.TestCase):
 
         with self.assertRaisesRegex(api.HTTPException, "Only draft projects can be started"):
             self.start_project(draft["id"])
+
+    def test_voiceover_only_with_improved_transcript_enables_resume(self) -> None:
+        draft = self.import_episode()
+        root = api.PROJECTS_DIR / draft["id"]
+        api.save_project_file(
+            draft["id"],
+            "e034.improved.json",
+            api.FileContentUpdateRequest(content='[{"start":"0000","imp":"Ready"}]'),
+        )
+        self.assertEqual(
+            (root / "input" / "e034.improved.json").read_text(encoding="utf-8"),
+            '[{"start":"0000","imp":"Ready"}]',
+        )
+
+        project = self.start_project(draft["id"], stages_to_run="voiceover")
+        params = json.loads((root / "config" / "params.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(project["status"]["state"], "queued")
+        self.assertEqual(params["stages_to_run"], "voiceover")
+        self.assertTrue(params["resume_from_improved"])
 
     def test_missing_transcript_still_creates_audio_draft(self) -> None:
         with patch.object(
@@ -167,9 +187,9 @@ class VibeVoiceProviderTests(unittest.TestCase):
                 self.build_payload()
 
     def test_configured_base_url_persists_vibevoice_params(self) -> None:
-        env = {"OPENAI_API_KEY": "test-key", "VIBEVOICE_BASE_URL": "http://127.0.0.1:8000/v1"}
+        env = {"OPENAI_API_KEY": "", "VIBEVOICE_BASE_URL": "http://127.0.0.1:8000/v1"}
         with patch.dict(os.environ, env, clear=False):
-            params, metadata = self.build_payload()
+            params, metadata = self.build_payload(stages_to_run="voiceover")
 
         self.assertEqual(params["tts_api"], "vibevoice")
         self.assertEqual(metadata["tts_api"], "vibevoice")
@@ -177,6 +197,12 @@ class VibeVoiceProviderTests(unittest.TestCase):
         self.assertEqual(params["vibevoice_model"], "7B")
         self.assertEqual(params["vibevoice_cfg_scale"], "1.3")
         self.assertEqual(params["vibevoice_speed"], "1.0")
+
+    def test_vibevoice_with_openai_stage_still_requires_openai(self) -> None:
+        env = {"OPENAI_API_KEY": "", "VIBEVOICE_BASE_URL": "http://127.0.0.1:8000/v1"}
+        with patch.dict(os.environ, env, clear=False):
+            with self.assertRaisesRegex(api.HTTPException, "OPENAI_API_KEY is required"):
+                self.build_payload(stages_to_run="translate+voiceover")
 
     def test_empty_vibevoice_fields_are_not_persisted(self) -> None:
         env = {"OPENAI_API_KEY": "test-key", "VIBEVOICE_BASE_URL": "http://127.0.0.1:8000/v1"}
