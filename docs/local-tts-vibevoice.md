@@ -16,11 +16,11 @@ process you start yourself; Podocracy only talks to it over HTTP.
 
 ## 1. Start the server
 
-Start VibeVoice so it listens on `127.0.0.1:8000`. Confirm it is up:
+Start VibeVoice so it listens on `127.0.0.1:8765`. Confirm it is up:
 
 ```bash
-curl http://127.0.0.1:8000/health
-curl http://127.0.0.1:8000/v1/voices
+curl http://127.0.0.1:8765/health
+curl http://127.0.0.1:8765/v1/voices
 ```
 
 ### Port 8000 is not a conflict
@@ -35,7 +35,7 @@ Uncomment and set these in your `.env` (see `.env.example`):
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `VIBEVOICE_BASE_URL` | `http://host.docker.internal:8000/v1` | Root of the OpenAI-compatible API. Setting a value is what marks the provider configured. |
+| `VIBEVOICE_BASE_URL` | `http://host.docker.internal:8765/v1` | Root of the OpenAI-compatible API. Setting a value is what marks the provider configured. |
 | `VIBEVOICE_API_KEY` | empty | Bearer token; sent only when non-empty. |
 | `VIBEVOICE_TTS_MODEL` | `7B` | Checkpoint or alias sent as `model`. |
 | `VIBEVOICE_TTS_VOICE` | `SEBBE` | Fallback voice when the project has none. |
@@ -52,7 +52,7 @@ the container itself, not your machine. `host.docker.internal` resolves to the h
 Compose files map it explicitly via `extra_hosts: host-gateway` so this works on Linux and
 Colima as well as Docker Desktop.
 
-If you run the worker **outside** Docker, set `VIBEVOICE_BASE_URL=http://127.0.0.1:8000/v1`.
+If you run the worker **outside** Docker, set `VIBEVOICE_BASE_URL=http://127.0.0.1:8765/v1`.
 
 `VIBEVOICE_BASE_URL` and `VIBEVOICE_API_KEY` are read from the environment only. They are
 deliberately not project parameters: a per-project base URL would let anyone who can post to

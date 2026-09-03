@@ -42,13 +42,13 @@ def get_voice_name(path):
     before_sleep=before_sleep_log(logging, logging.INFO)
 )
 def generate_openai_tts(path, text, speech_file_path, voice):
-    tts_api = str(get_params("tts_api") or "openai").lower()
+    tts_api = str(get_params("tts_api", path=path) or "openai").lower()
     if tts_api == "elevenlabs":
         logging.info(f"Using ElevenLabs TTS API for {speech_file_path}")
         return tts_elevenlabs(text, speech_file_path)
     if tts_api == "vibevoice":
         logging.info(f"Using local VibeVoice TTS server for {speech_file_path}")
-        return tts_vibevoice(text, speech_file_path, voice)
+        return tts_vibevoice(path, text, speech_file_path, voice)
 
     from openai import OpenAI
     import os
@@ -69,7 +69,7 @@ def generate_openai_tts(path, text, speech_file_path, voice):
     return None
 
 
-def tts_vibevoice(text: str, speech_file_path: str, voice: str) -> None:
+def tts_vibevoice(path: str, text: str, speech_file_path: str, voice: str) -> None:
     """Local, OpenAI-compatible TTS server. This legacy path writes .ogg, so ask the
     server for ogg rather than the mp3 the portal worker requests."""
     import os
@@ -90,7 +90,7 @@ def tts_vibevoice(text: str, speech_file_path: str, voice: str) -> None:
     def param(name):
         # get_params raises on an older parameters.json that predates these keys.
         try:
-            return get_params(name)
+            return get_params(name, path=path)
         except Exception:
             return ""
 

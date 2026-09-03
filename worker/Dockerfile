@@ -10,7 +10,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir "setuptools==67.6.0" wheel && \
+    pip install --no-cache-dir --no-build-isolation openai-whisper==20231117 && \
+    pip install --no-cache-dir -r requirements.txt
 
 COPY worker_poll.py ./
 COPY processing_container ./processing_container

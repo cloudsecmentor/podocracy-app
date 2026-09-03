@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import fcntl
 import os
 import shutil
 import subprocess
@@ -128,20 +129,19 @@ def process_project(project: Path) -> None:
 
 def acquire_lock(project: Path) -> int | None:
     lock_path = project / ".worker.lock"
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        return os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd
+    except BlockingIOError:
+        os.close(fd)
         return None
 
 
 def release_lock(project: Path, fd: int | None) -> None:
     if fd is not None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
-    lock_path = project / ".worker.lock"
-    try:
-        lock_path.unlink()
-    except FileNotFoundError:
-        pass
 
 
 def next_queued_project() -> Path | None:

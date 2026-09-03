@@ -201,7 +201,7 @@ colima start
 | `LOCAL_WHISPER_MODEL` | `small` | Default model for the `local-whisper` transcription provider when the project sets none. |
 | `DEEPL_AUTH_KEY` | empty | Enables DeepL translation provider. |
 | `ELEVENLABS_API_KEY` | empty | Enables ElevenLabs TTS provider. |
-| `VIBEVOICE_BASE_URL` | empty (`http://host.docker.internal:8000/v1` when enabled) | Root of a local OpenAI-compatible VibeVoice TTS server. Setting a value enables the provider. |
+| `VIBEVOICE_BASE_URL` | empty (`http://host.docker.internal:8765/v1` when enabled) | Root of a local OpenAI-compatible VibeVoice TTS server. Setting a value enables the provider. |
 | `VIBEVOICE_API_KEY` | empty | Bearer token for the VibeVoice server; sent only when non-empty. |
 | `VIBEVOICE_TTS_MODEL` | `7B` | VibeVoice checkpoint or OpenAI alias sent as `model`. |
 | `VIBEVOICE_TTS_VOICE` | `SEBBE` | Fallback VibeVoice voice when the project has none. |
@@ -250,6 +250,11 @@ zero-shot clone of your own voice. Set `VIBEVOICE_BASE_URL`, then pick **VibeVoi
 as the voiceover engine in the portal. See
 [docs/local-tts-vibevoice.md](docs/local-tts-vibevoice.md) for setup, throughput
 expectations, and the security warning about exposing the server.
+
+If **VibeVoice (local)** is missing from the voiceover engine picker, the prebuilt
+`podocracy-web` image predates that feature's release. Check whether `main` has commits
+under `apps/web` newer than the latest tag (`git log <latest-tag>..HEAD -- apps/web`); if
+so, run from source instead of pulling images — see [Local Source Run](#local-source-run).
 
 ### Prebuilt Images From Repo Checkout
 
