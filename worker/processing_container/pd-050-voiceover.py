@@ -120,6 +120,20 @@ def tts_vibevoice(path: str, text: str, speech_file_path: str, voice: str) -> No
 
     with open(speech_file_path, "wb") as handle:
         handle.write(response.content)
+
+    quality_header = response.headers.get("X-Synth-Quality", "")
+    if quality_header:
+        parts = quality_header.split("/")
+        if len(parts) == 2:
+            try:
+                avg_logprob, no_speech_prob = float(parts[0]), float(parts[1])
+                if avg_logprob < -0.8 or no_speech_prob > 0.6:
+                    logging.warning(
+                        f"Possible garbled output for {speech_file_path}: "
+                        f"avg_logprob={avg_logprob:.2f} no_speech_prob={no_speech_prob:.2f}"
+                    )
+            except ValueError:
+                pass
     return None
 
 
@@ -1017,7 +1031,7 @@ def prepare_custom_recording_dir(path, user_id, file_name):
         return None
 
 
-def main(path, existing_dir=None):
+def main(path, existing_dir=None, redo_segment=None):
 
     setup_logging_with_appinsights(path)
 
@@ -1039,15 +1053,32 @@ def main(path, existing_dir=None):
         logging.info(f"custom_recording for [{user_id=}] [{file_name=}] [{custom_speedup=}]")
         existing_dir = prepare_custom_recording_dir(path, user_id, file_name)
 
+    # Always load the improved transcript — needed for full generation and redo.
+    path_improved = naming_convention(path, "improved")
+    import json
+    transcript_improved = json.loads(get_palintext_content(path_improved))
+
     if existing_dir:
         temp_dir = existing_dir
         logging.info(f"Generated audio found in directory [{temp_dir}]")
+
+        if redo_segment:
+            # Regenerate only the requested segment file then fall through to reassembly.
+            transName = get_params("improved_text_key")
+            voice = get_voice_name(path)
+            target = f"{redo_segment}.ogg"
+            chunk = next(
+                (c for c in transcript_improved
+                 if f"{c.get('start', '')}-{c.get('end', '')}" == redo_segment),
+                None,
+            )
+            if chunk is None:
+                raise ValueError(f"Segment '{redo_segment}' not found in improved transcript")
+            audio_file_path = f"{temp_dir}/{target}"
+            logging.info(f"Re-generating segment {redo_segment} → {audio_file_path}")
+            generate_openai_tts(path=path, text=chunk[transName], speech_file_path=audio_file_path, voice=voice)
+            logging.info(f"Segment {redo_segment} regenerated; re-assembling…")
     else:
-
-        path_improved = naming_convention(path, "improved")
-        import json
-        transcript_improved = json.loads( get_palintext_content(path_improved) )
-
         local_file = get_local_file_path(path_improved)
         temp_dir = create_timestamped_directory(local_file)
         logging.info(f"Generating audio based on file : [{path_improved}] in directory [{temp_dir}]")
@@ -1079,8 +1110,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('-p', '--path', type=str, required=True, help="Path to the mp3 file")
     parser.add_argument('-d', '--dir', type=str, required=False, help="directory to saved synthesized files", default=None)
+    parser.add_argument(
+        '--redo-segment', type=str, required=False, default=None,
+        help="Re-generate a single segment and re-assemble (e.g. '0738-0749'). Requires --dir.",
+    )
     args = parser.parse_args()
-    main(args.path, args.dir)
+    if args.redo_segment and not args.dir:
+        parser.error("--redo-segment requires --dir pointing at the existing synthesis directory")
+    main(args.path, args.dir, redo_segment=args.redo_segment)
 
 
 
