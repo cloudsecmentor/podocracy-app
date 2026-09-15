@@ -170,6 +170,22 @@ def collect_logs_and_data(path):
     return None
        
 
+# `voiceover` remains the ordinary end-to-end run; these two are its halves and
+# are only ever run when asked for by name.
+SCOPED_VOICEOVER_STAGES = {"tts", "voiceover-build"}
+
+
+def assembles_voiceover(stages):
+    if stages == "all":
+        return True
+    requested = {stage for stage in stages.split("+") if stage}
+    if {"voiceover", "voiceover-build"} & requested:
+        return True
+    # Only a synthesize-only rerun opts out; every pre-existing preset keeps its
+    # postprocess stage.
+    return "tts" not in requested
+
+
 def add_pre_post_processing(stages, scripts, path, current_directory, custom_subtitles=False):
     logging.info(f"Updating stages and scripts: {stages=} {scripts=}")
     # if processing url file, add url processing script
@@ -195,8 +211,13 @@ def add_pre_post_processing(stages, scripts, path, current_directory, custom_sub
     postprocess_script = [
         ("postprocess",    f"{current_directory}/pd-055-postprocess.py", ["-p", path]),
     ]
-    scripts = scripts + postprocess_script
-    stages = stages + "+postprocess" if stages != "all" else stages
+    if assembles_voiceover(stages):
+        scripts = scripts + postprocess_script
+        stages = stages + "+postprocess" if stages != "all" else stages
+    else:
+        # Filling the segment store produces no new mix, so there is nothing for
+        # postprocess to merge into the video.
+        logging.info("Voiceover assembly not requested, skipping postprocess stage.")
 
     return stages, scripts
 
@@ -255,6 +276,10 @@ def main(path, time2sleep=0):
         ("customize",  f"{current_directory}/pd-035-customize.py", ["-p", path]),
         ("improve",    f"{current_directory}/pd-040-improve.py", ["-p", path]),
         ("voiceover",  f"{current_directory}/pd-050-voiceover.py", ["-p", path]),
+        # Two halves of `voiceover`, for reruns that should not redo the other half:
+        # `tts` fills the per-chunk segment store, `voiceover-build` assembles from it.
+        ("tts",             f"{current_directory}/pd-050-voiceover.py", ["-p", path, "--mode", "synthesize"]),
+        ("voiceover-build", f"{current_directory}/pd-050-voiceover.py", ["-p", path, "--mode", "build"]),
     ]
 
     stages = params["stages_to_run"]
@@ -284,7 +309,7 @@ def main(path, time2sleep=0):
     runnable_scripts = [
         (stage, script, args)
         for stage, script, args in scripts
-        if stage in stages_set or stages == "all"
+        if stage in stages_set or (stages == "all" and stage not in SCOPED_VOICEOVER_STAGES)
     ]
     total_runnable = max(len(runnable_scripts), 1)
     stage_failures: list[str] = []

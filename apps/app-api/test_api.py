@@ -402,3 +402,222 @@ class LegacyProjectCompatibilityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SegmentEndpointTests(unittest.TestCase):
+    """Per-chunk voiceover audio: listing, recording upload, delete, requeue."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        api.PROJECTS_DIR = Path(self.temp_dir.name)
+        self.project_id = "project-test"
+        self.root = api.PROJECTS_DIR / self.project_id
+        (self.root / "input").mkdir(parents=True)
+        (self.root / "config").mkdir(parents=True)
+        (self.root / "input" / "e144.mp3").write_bytes(b"audio")
+        self.improved = self.root / "input" / "e144.improved.json"
+        self.write_transcript(
+            [
+                {"start": "0000", "end": "0010", "text": "one", "dltrans": "uno", "imp": "first"},
+                {"start": "0010", "text": "two", "dltrans": "dos", "imp": "second"},
+            ]
+        )
+        api.write_json(self.root / "config" / "params.json", {"tts_api": "openai", "voice": "alloy"})
+        api.write_json(self.root / "metadata.json", {"source_path": "input/e144.mp3"})
+        self.set_state("completed")
+
+    def write_transcript(self, chunks: list[dict]) -> None:
+        self.improved.write_text(json.dumps(chunks, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    def read_transcript(self) -> list[dict]:
+        return json.loads(self.improved.read_text(encoding="utf-8"))
+
+    def set_state(self, state: str) -> None:
+        api.write_json(self.root / "status.json", {"project_id": self.project_id, "state": state})
+
+    def upload(self, chunk_id: str, filename: str = "c000.webm", payload: bytes = b"recorded-audio"):
+        import io
+
+        from fastapi import UploadFile
+
+        return api.upload_segment_audio(
+            project_id=self.project_id,
+            chunk_id=chunk_id,
+            file=UploadFile(file=io.BytesIO(payload), filename=filename),
+        )
+
+    def params(self) -> dict:
+        return json.loads((self.root / "config" / "params.json").read_text(encoding="utf-8"))
+
+    # ---------------------------------------------------------------- listing
+
+    def test_listing_assigns_and_persists_stable_chunk_ids(self) -> None:
+        payload = api.list_segments(self.project_id)
+
+        self.assertEqual([item["chunk_id"] for item in payload["segments"]], ["c000", "c001"])
+        self.assertEqual([item["chunk_id"] for item in self.read_transcript()], ["c000", "c001"])
+        self.assertTrue(all(item["status"] == "missing" for item in payload["segments"]))
+        self.assertFalse(payload["busy"])
+
+    def test_listing_reports_a_chunk_without_text_as_skipped(self) -> None:
+        self.write_transcript([{"start": "0000", "text": "one", "imp": ""}])
+        payload = api.list_segments(self.project_id)
+        self.assertEqual(payload["segments"][0]["status"], "skipped")
+
+    def test_listing_resolves_the_file_the_worker_reads(self) -> None:
+        # A stale work/source.improved.json must not win over the source-stem
+        # file, or the editor and the pipeline edit two different transcripts.
+        (self.root / "work").mkdir(parents=True, exist_ok=True)
+        (self.root / "work" / "source.improved.json").write_text("[]", encoding="utf-8")
+        self.assertEqual(api.list_segments(self.project_id)["filename"], "e144.improved.json")
+
+    # ---------------------------------------------------------------- upload
+
+    def test_upload_parks_the_recording_for_the_worker(self) -> None:
+        api.list_segments(self.project_id)
+        result = self.upload("c000")
+
+        self.assertEqual(result["status"], "pending_ingest")
+        raw = self.root / "work" / "segments" / "raw" / "c000.webm"
+        self.assertEqual(raw.read_bytes(), b"recorded-audio")
+        entry = api.seg.load_index(self.root)["segments"]["c000"]
+        self.assertEqual(entry["source"], "recording")
+        self.assertEqual(entry["text_hash"], api.seg.text_hash("first"))
+
+    def test_uploaded_recording_is_playable_before_the_worker_converts_it(self) -> None:
+        api.list_segments(self.project_id)
+        self.upload("c000")
+        response = api.get_segment_audio(self.project_id, "c000")
+        self.assertEqual(response.media_type, "audio/webm")
+
+    def test_re_recording_replaces_the_previous_take(self) -> None:
+        api.list_segments(self.project_id)
+        self.upload("c000", filename="c000.webm")
+        self.upload("c000", filename="c000.ogg", payload=b"second-take")
+
+        raw_dir = self.root / "work" / "segments" / "raw"
+        self.assertEqual([item.name for item in raw_dir.glob("c000.*")], ["c000.ogg"])
+        self.assertEqual((raw_dir / "c000.ogg").read_bytes(), b"second-take")
+
+    def test_upload_replaces_generated_audio_for_that_chunk(self) -> None:
+        api.list_segments(self.project_id)
+        canonical = self.root / "work" / "segments" / "c000.ogg"
+        canonical.parent.mkdir(parents=True, exist_ok=True)
+        canonical.write_bytes(b"generated")
+
+        self.upload("c000")
+
+        self.assertFalse(canonical.exists())
+        self.assertEqual(api.seg.load_index(self.root)["segments"]["c000"]["source"], "recording")
+
+    def test_upload_rejects_unsupported_types_empty_bodies_and_oversized_files(self) -> None:
+        api.list_segments(self.project_id)
+        with self.assertRaisesRegex(api.HTTPException, "Unsupported audio type"):
+            self.upload("c000", filename="c000.exe")
+        with self.assertRaisesRegex(api.HTTPException, "empty"):
+            self.upload("c000", payload=b"")
+        with patch.object(api, "SEGMENT_UPLOAD_MAX_BYTES", 4):
+            with self.assertRaisesRegex(api.HTTPException, "limit"):
+                self.upload("c000", payload=b"much too long")
+
+    def test_upload_rejects_an_unknown_chunk(self) -> None:
+        api.list_segments(self.project_id)
+        with self.assertRaisesRegex(api.HTTPException, "not in the transcript"):
+            self.upload("c099")
+
+    def test_invalid_chunk_ids_are_rejected_before_touching_the_filesystem(self) -> None:
+        for chunk_id in ("../../etc", "c1", "source"):
+            with self.assertRaisesRegex(api.HTTPException, "Invalid chunk id"):
+                api.delete_segment_audio(self.project_id, chunk_id)
+
+    # ---------------------------------------------------------------- delete
+
+    def test_delete_removes_every_file_and_the_index_entry(self) -> None:
+        api.list_segments(self.project_id)
+        self.upload("c000")
+        canonical = self.root / "work" / "segments" / "c000.ogg"
+        canonical.write_bytes(b"generated")
+
+        api.delete_segment_audio(self.project_id, "c000")
+
+        self.assertFalse(canonical.exists())
+        self.assertFalse((self.root / "work" / "segments" / "raw" / "c000.webm").exists())
+        self.assertNotIn("c000", api.seg.load_index(self.root)["segments"])
+        self.assertEqual(api.list_segments(self.project_id)["segments"][0]["status"], "missing")
+
+    def test_get_audio_is_404_when_the_chunk_has_none(self) -> None:
+        api.list_segments(self.project_id)
+        with self.assertRaisesRegex(api.HTTPException, "No audio"):
+            api.get_segment_audio(self.project_id, "c000")
+
+    # ---------------------------------------------------------------- queueing
+
+    def test_regenerate_scopes_the_job_to_one_chunk(self) -> None:
+        api.list_segments(self.project_id)
+        project = api.regenerate_segment(self.project_id, "c001")
+
+        self.assertEqual(project["status"]["state"], "queued")
+        self.assertEqual(project["status"]["job_kind"], "tts-chunk")
+        self.assertEqual(self.params()["stages_to_run"], "tts")
+        self.assertEqual(self.params()["voiceover_chunks"], ["c001"])
+
+    def test_regenerate_refuses_a_chunk_with_no_text(self) -> None:
+        self.write_transcript([{"start": "0000", "text": "one", "imp": "", "dltrans": ""}])
+        api.list_segments(self.project_id)
+        with self.assertRaisesRegex(api.HTTPException, "no text"):
+            api.regenerate_segment(self.project_id, "c000")
+
+    def test_synthesize_and_build_request_only_their_half(self) -> None:
+        self.assertEqual(api.synthesize_missing_segments(self.project_id)["status"]["job_kind"], "tts")
+        self.assertEqual(self.params()["stages_to_run"], "tts")
+
+        self.set_state("completed")
+        self.assertEqual(api.build_voiceover(self.project_id)["status"]["job_kind"], "voiceover-build")
+        self.assertEqual(self.params()["stages_to_run"], "voiceover-build")
+
+    def test_a_full_run_clears_a_previous_scoped_rerun(self) -> None:
+        api.list_segments(self.project_id)
+        api.regenerate_segment(self.project_id, "c001")
+        self.assertIn("voiceover_chunks", self.params())
+
+        self.set_state("completed")
+        api.start_voiceover(self.project_id)
+
+        self.assertNotIn("voiceover_chunks", self.params())
+        self.assertEqual(self.params()["stages_to_run"], "voiceover")
+
+    def test_every_mutation_is_refused_while_a_job_is_running(self) -> None:
+        api.list_segments(self.project_id)
+        for state in ("queued", "running"):
+            self.set_state(state)
+            for call in (
+                lambda: api.start_voiceover(self.project_id),
+                lambda: api.synthesize_missing_segments(self.project_id),
+                lambda: api.build_voiceover(self.project_id),
+                lambda: api.regenerate_segment(self.project_id, "c000"),
+                lambda: api.delete_segment_audio(self.project_id, "c000"),
+                lambda: self.upload("c000"),
+            ):
+                with self.assertRaises(api.HTTPException) as caught:
+                    call()
+                self.assertEqual(caught.exception.status_code, 409)
+
+    def test_listing_still_works_while_a_job_is_running(self) -> None:
+        api.list_segments(self.project_id)
+        self.set_state("running")
+        payload = api.list_segments(self.project_id)
+        self.assertTrue(payload["busy"])
+
+    # ---------------------------------------------------------------- round-trip
+
+    def test_saving_the_transcript_preserves_worker_owned_fields(self) -> None:
+        api.list_segments(self.project_id)
+        chunks = self.read_transcript()
+        chunks[0]["audio"] = {"file": "work/segments/c000.ogg", "status": "ready"}
+        api.write_improved_transcript(self.root, self.improved, chunks)
+
+        reloaded = api.list_segments(self.project_id)
+        self.assertEqual(reloaded["segments"][0]["chunk_id"], "c000")
+        self.assertIn("audio", self.read_transcript()[0])
+        self.assertEqual(self.read_transcript()[0]["dltrans"], "uno")

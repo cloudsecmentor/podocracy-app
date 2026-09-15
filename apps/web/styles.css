@@ -963,6 +963,85 @@ a:focus-visible {
   background: var(--danger-tint);
 }
 
+/* ---------- Per-chunk audio (improved page) ---------- */
+
+.segment-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+}
+
+.segment-button {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: var(--panel);
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.segment-button:hover:not(:disabled) {
+  background: var(--paper);
+}
+
+.segment-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.segment-button.recording {
+  background: var(--signal-tint);
+  border-color: var(--signal);
+  color: var(--signal-strong);
+}
+
+.segment-button.danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.segment-button.danger:hover:not(:disabled) {
+  background: var(--danger-tint);
+}
+
+.segment-status {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--mute);
+}
+
+.segment-status.ok {
+  color: var(--ok);
+}
+
+.segment-status.warning {
+  color: var(--warn);
+}
+
+.segment-status.danger {
+  color: var(--danger);
+}
+
+.segment-meta {
+  font-size: 12px;
+}
+
+.danger-text {
+  color: var(--danger);
+}
+
 /* ---------- Empty & loading states ---------- */
 
 .empty {

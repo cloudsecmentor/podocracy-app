@@ -20,6 +20,8 @@ from pydantic import BaseModel
 
 import requests
 
+import segments as seg
+
 
 PROJECTS_DIR = Path(os.getenv("PROJECTS_DIR", "/data/projects"))
 PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -33,7 +35,20 @@ DOWNLOADABLE_WORK_FILES = {
     "source.custom-instructions.json",
     "source.custom-instructions.txt",
 }
-STAGE_OPTIONS = {"transcribe", "translate", "customize", "improve", "voiceover"}
+# `tts` and `voiceover-build` are the two halves of `voiceover`, for reruns that
+# should not redo the other half.
+STAGE_OPTIONS = {"transcribe", "translate", "customize", "improve", "voiceover", "tts", "voiceover-build"}
+BUSY_STATES = {"queued", "running"}
+SEGMENT_UPLOAD_MAX_BYTES = int(os.getenv("SEGMENT_UPLOAD_MAX_BYTES", str(25 * 1024 * 1024)))
+SEGMENT_MEDIA_TYPES = {
+    "ogg": "audio/ogg",
+    "oga": "audio/ogg",
+    "webm": "audio/webm",
+    "m4a": "audio/mp4",
+    "mp4": "audio/mp4",
+    "mp3": "audio/mpeg",
+    "wav": "audio/wav",
+}
 SUPPORTED_TARGET_LANGUAGES = {
     "EN": "English",
     "RU": "Russian",
@@ -180,6 +195,13 @@ def find_project_file(root: Path, suffix: str) -> Path | None:
 
 
 def improved_artifact_for_project(root: Path) -> Path | None:
+    # The worker reads and writes the file named after the source stem. Resolving
+    # to anything else lets the editor and the pipeline drift onto two copies.
+    source_path = source_path_for_project(root)
+    if source_path is not None:
+        canonical = source_path.parent / f"{source_path.stem}.improved.json"
+        if canonical.is_file():
+            return canonical
     candidates = []
     for directory in (root / "work", root / "output", root / "input"):
         candidates.extend(
@@ -1114,11 +1136,72 @@ def save_project_instructions(project_id: str, body: CustomInstructionsUpdateReq
     return {"ok": True, "custom_instructions": params["custom_instructions"]}
 
 
-@app.post("/api/projects/{project_id}/voiceover")
-def start_voiceover(project_id: str) -> dict[str, Any]:
-    root = project_path(project_id)
-    improved_path = improved_artifact_for_project(root) or (root / "work" / "source.improved.json")
-    if not improved_path.exists():
+def project_text_keys(params: dict[str, Any]) -> tuple[str, str]:
+    return (
+        str(params.get("improved_text_key") or "imp"),
+        str(params.get("translation_text_key") or "dltrans"),
+    )
+
+
+def ensure_project_idle(root: Path) -> None:
+    """One worker runs one project at a time, so a second job would either be
+    dropped or race the first. Say so instead of pretending it was accepted."""
+    status = read_json(root / "status.json", {})
+    state = status.get("state")
+    if state in BUSY_STATES:
+        stage = status.get("stage") or "unknown"
+        raise HTTPException(status_code=409, detail=f"Project is {state} ({stage}). Wait for it to finish.")
+
+
+def write_improved_transcript(root: Path, path: Path, chunks: list[dict[str, Any]]) -> None:
+    content = json.dumps(chunks, indent=2, ensure_ascii=False)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    canonical = root / "work" / "source.improved.json"
+    if canonical != path:
+        canonical.parent.mkdir(parents=True, exist_ok=True)
+        canonical.write_text(content, encoding="utf-8")
+
+
+def load_transcript_chunks(root: Path) -> tuple[Path, list[dict[str, Any]]]:
+    """The transcript plus a guarantee that every chunk has a stable id."""
+    path = improved_artifact_for_project(root)
+    if path is None:
+        raise HTTPException(status_code=404, detail="Improved transcript not found")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Improved transcript is not valid JSON: {exc}") from exc
+    if not isinstance(data, list) or not all(isinstance(item, dict) for item in data):
+        raise HTTPException(status_code=400, detail="Improved transcript is not a chunk array")
+    if seg.assign_chunk_ids(data):
+        write_improved_transcript(root, path, data)
+    return path, data
+
+
+def find_chunk(chunks: list[dict[str, Any]], chunk_id: str) -> dict[str, Any]:
+    chunk = next((item for item in chunks if item.get("chunk_id") == chunk_id), None)
+    if chunk is None:
+        raise HTTPException(status_code=404, detail=f"Chunk {chunk_id} is not in the transcript")
+    return chunk
+
+
+def validate_chunk_id(chunk_id: str) -> str:
+    if not seg.is_chunk_id(chunk_id):
+        raise HTTPException(status_code=400, detail="Invalid chunk id")
+    return chunk_id
+
+
+def queue_voiceover_job(
+    root: Path,
+    *,
+    stages: str,
+    job_kind: str,
+    message: str,
+    chunk_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    improved_path = improved_artifact_for_project(root)
+    if improved_path is None or not improved_path.exists():
         raise HTTPException(status_code=400, detail="Improved transcript is missing")
     canonical_improved = root / "work" / "source.improved.json"
     canonical_improved.parent.mkdir(parents=True, exist_ok=True)
@@ -1127,25 +1210,194 @@ def start_voiceover(project_id: str) -> dict[str, Any]:
 
     params = read_json(root / "config" / "params.json", {})
     params["stage_preset"] = "voiceover"
-    params["stages_to_run"] = "voiceover"
+    params["stages_to_run"] = stages
     params["resume_from_improved"] = True
+    if chunk_ids:
+        params["voiceover_chunks"] = chunk_ids
+    else:
+        # A previous scoped rerun must not silently scope this one.
+        params.pop("voiceover_chunks", None)
     write_json(root / "config" / "params.json", params)
     source_path = source_path_for_project(root)
     if source_path is not None:
         write_json(source_path.with_suffix(".params.json"), params)
-    status = {
-        "project_id": project_id,
-        "state": "queued",
-        "stage": "queued",
-        "progress": 0,
-        "message": "Queued for voiceover from improved transcript",
-        "updated_at": now_iso(),
-    }
-    write_json(root / "status.json", status)
-    manifest = read_json(root / "manifest.json", {"project_id": project_id, "artifacts": [], "stages": []})
+    write_json(
+        root / "status.json",
+        {
+            "project_id": root.name,
+            "state": "queued",
+            "stage": "queued",
+            "progress": 0,
+            "job_kind": job_kind,
+            "message": message,
+            "updated_at": now_iso(),
+        },
+    )
+    manifest = read_json(root / "manifest.json", {"project_id": root.name, "artifacts": [], "stages": []})
     manifest.setdefault("stages", [])
     write_json(root / "manifest.json", manifest)
     return project_summary(root)
+
+
+@app.post("/api/projects/{project_id}/voiceover")
+def start_voiceover(project_id: str) -> dict[str, Any]:
+    root = project_path(project_id)
+    ensure_project_idle(root)
+    return queue_voiceover_job(
+        root,
+        stages="voiceover",
+        job_kind="voiceover",
+        message="Queued for voiceover from improved transcript",
+    )
+
+
+@app.post("/api/projects/{project_id}/voiceover/synthesize")
+def synthesize_missing_segments(project_id: str) -> dict[str, Any]:
+    root = project_path(project_id)
+    ensure_project_idle(root)
+    return queue_voiceover_job(
+        root,
+        stages="tts",
+        job_kind="tts",
+        message="Queued generation of missing and stale chunks",
+    )
+
+
+@app.post("/api/projects/{project_id}/voiceover/build")
+def build_voiceover(project_id: str) -> dict[str, Any]:
+    root = project_path(project_id)
+    ensure_project_idle(root)
+    return queue_voiceover_job(
+        root,
+        stages="voiceover-build",
+        job_kind="voiceover-build",
+        message="Queued voiceover assembly from existing chunk audio",
+    )
+
+
+@app.get("/api/projects/{project_id}/segments")
+def list_segments(project_id: str) -> dict[str, Any]:
+    """Every chunk's audio state in one call. The editor renders one row per
+    chunk, so a per-chunk request would mean hundreds of round trips."""
+    root = project_path(project_id)
+    path, chunks = load_transcript_chunks(root)
+    params = read_json(root / "config" / "params.json", {})
+    improved_key, translation_key = project_text_keys(params)
+    status = read_json(root / "status.json", {})
+    return {
+        "project_id": project_id,
+        "filename": path.name,
+        "busy": status.get("state") in BUSY_STATES,
+        "job_kind": status.get("job_kind"),
+        "segments": seg.describe_chunks(
+            root, chunks, params, improved_key=improved_key, translation_key=translation_key
+        ),
+    }
+
+
+@app.get("/api/projects/{project_id}/segments/{chunk_id}/audio")
+def get_segment_audio(project_id: str, chunk_id: str) -> FileResponse:
+    root = project_path(project_id)
+    validate_chunk_id(chunk_id)
+    entry = seg.segment_entry(seg.load_index(root), chunk_id)
+    audio = seg.audio_path(root, entry)
+    if audio is None:
+        raise HTTPException(status_code=404, detail="No audio for this chunk")
+    extension = audio.suffix.lstrip(".").lower()
+    return FileResponse(
+        path=audio,
+        media_type=SEGMENT_MEDIA_TYPES.get(extension, "application/octet-stream"),
+        filename=audio.name,
+    )
+
+
+@app.put("/api/projects/{project_id}/segments/{chunk_id}/audio")
+def upload_segment_audio(project_id: str, chunk_id: str, file: UploadFile = File(...)) -> dict[str, Any]:
+    """Park a browser recording for the worker to convert.
+
+    This image has no ffmpeg, so the upload is stored untouched and marked
+    pending; the worker turns it into the canonical ogg on its next run. The raw
+    file stays playable in the browser in the meantime.
+    """
+    root = project_path(project_id)
+    validate_chunk_id(chunk_id)
+    ensure_project_idle(root)
+    _, chunks = load_transcript_chunks(root)
+    chunk = find_chunk(chunks, chunk_id)
+
+    extension = (Path(file.filename or "").suffix.lstrip(".") or "webm").lower()
+    if extension not in seg.RAW_UPLOAD_EXTENSIONS:
+        allowed = ", ".join(seg.RAW_UPLOAD_EXTENSIONS)
+        raise HTTPException(status_code=400, detail=f"Unsupported audio type '.{extension}'. Allowed: {allowed}")
+    payload = file.file.read(SEGMENT_UPLOAD_MAX_BYTES + 1)
+    if not payload:
+        raise HTTPException(status_code=400, detail="Recording is empty")
+    if len(payload) > SEGMENT_UPLOAD_MAX_BYTES:
+        limit_mb = SEGMENT_UPLOAD_MAX_BYTES // (1024 * 1024)
+        raise HTTPException(status_code=413, detail=f"Recording exceeds the {limit_mb} MB limit")
+
+    raw_dir = seg.raw_dir(root)
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    # One take per chunk, so a re-record cannot leave the previous one behind in
+    # a different container format.
+    for stale in raw_dir.glob(f"{chunk_id}.*"):
+        stale.unlink()
+    destination = raw_dir / f"{chunk_id}.{extension}"
+    destination.write_bytes(payload)
+    canonical = seg.store_dir(root) / f"{chunk_id}.{seg.CANONICAL_EXTENSION}"
+    if canonical.exists():
+        canonical.unlink()
+
+    params = read_json(root / "config" / "params.json", {})
+    improved_key, translation_key = project_text_keys(params)
+    index = seg.load_index(root)
+    index.setdefault("segments", {})[chunk_id] = {
+        "raw_file": f"raw/{destination.name}",
+        "source": seg.SOURCE_RECORDING,
+        "status": seg.STATUS_PENDING_INGEST,
+        "text_hash": seg.text_hash(seg.chunk_text(chunk, improved_key, translation_key)),
+        "bytes": len(payload),
+        "created_at": seg.now_iso(),
+    }
+    seg.save_index(root, index)
+    return {"ok": True, "chunk_id": chunk_id, "status": seg.STATUS_PENDING_INGEST, "bytes": len(payload)}
+
+
+@app.delete("/api/projects/{project_id}/segments/{chunk_id}/audio")
+def delete_segment_audio(project_id: str, chunk_id: str) -> dict[str, Any]:
+    root = project_path(project_id)
+    validate_chunk_id(chunk_id)
+    ensure_project_idle(root)
+    index = seg.load_index(root)
+    index.get("segments", {}).pop(chunk_id, None)
+    for directory in (seg.store_dir(root), seg.raw_dir(root)):
+        if not directory.exists():
+            continue
+        for leftover in directory.glob(f"{chunk_id}.*"):
+            if leftover.is_file():
+                leftover.unlink()
+    seg.save_index(root, index)
+    return {"ok": True, "chunk_id": chunk_id, "status": seg.STATUS_MISSING}
+
+
+@app.post("/api/projects/{project_id}/segments/{chunk_id}/regenerate")
+def regenerate_segment(project_id: str, chunk_id: str) -> dict[str, Any]:
+    root = project_path(project_id)
+    validate_chunk_id(chunk_id)
+    ensure_project_idle(root)
+    _, chunks = load_transcript_chunks(root)
+    chunk = find_chunk(chunks, chunk_id)
+    params = read_json(root / "config" / "params.json", {})
+    improved_key, translation_key = project_text_keys(params)
+    if not seg.chunk_text(chunk, improved_key, translation_key):
+        raise HTTPException(status_code=400, detail="Chunk has no text to synthesize")
+    return queue_voiceover_job(
+        root,
+        stages="tts",
+        job_kind="tts-chunk",
+        message=f"Queued regeneration of chunk {chunk_id}",
+        chunk_ids=[chunk_id],
+    )
 
 
 @app.get("/api/projects/{project_id}/improved-file")

@@ -5,7 +5,9 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-PORTAL_PIPELINE_STAGES = frozenset({"transcribe", "translate", "customize", "improve", "voiceover"})
+PORTAL_PIPELINE_STAGES = frozenset(
+    {"transcribe", "translate", "customize", "improve", "voiceover", "tts", "voiceover-build"}
+)
 # Every other stage feeds artifacts to the stages after it, so its failure strands the rest of the run.
 NON_BLOCKING_STAGES = frozenset({"postprocess"})
 
@@ -60,6 +62,7 @@ def update_portal_status(
     if project_dir is None:
         return
 
+    previous = read_json(project_dir / "status.json", {})
     status = {
         "project_id": project_dir.name,
         "state": state,
@@ -68,6 +71,9 @@ def update_portal_status(
         "message": message,
         "updated_at": now_iso(),
     }
+    # Set by the portal when the job was queued; the run must not erase it.
+    if previous.get("job_kind"):
+        status["job_kind"] = previous["job_kind"]
     if error:
         status["error"] = error
     write_json(project_dir / "status.json", status)

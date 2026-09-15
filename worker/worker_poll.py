@@ -36,6 +36,7 @@ def write_json(path: Path, data) -> None:
 
 
 def update_status(project: Path, state: str, stage: str, progress: int, message: str = "", error: str | None = None) -> None:
+    previous = read_json(project / "status.json", {})
     status = {
         "project_id": project.name,
         "state": state,
@@ -44,6 +45,10 @@ def update_status(project: Path, state: str, stage: str, progress: int, message:
         "message": message,
         "updated_at": now_iso(),
     }
+    # The portal sets job_kind when it queues the work; carrying it through the
+    # run is what lets the UI say "regenerating one chunk" rather than "running".
+    if previous.get("job_kind"):
+        status["job_kind"] = previous["job_kind"]
     if error:
         status["error"] = error
     write_json(project / "status.json", status)

@@ -1,9 +1,14 @@
 import glob
+import json
 import re
+import zipfile
+from pathlib import Path
 from tenacity import retry, wait_exponential, stop_after_attempt, before_sleep_log
 from shared_functions import *
 from azure.storage.blob import BlobServiceClient
 from frontend.shared_functions_frontend import get_container_name_from_id
+from common import segment_store as seg
+from portal_status import portal_project_dir
 
 def create_timestamped_directory(base="content"):
     import os
@@ -391,7 +396,13 @@ def  change_tempo (outfile, speedup):
 
 
 
-def update_tts_audio(path, path_synthesis, custom_speedup=None):
+def update_tts_audio(path, path_synthesis, custom_speedup=None, tempo_by_filename=None):
+    """Re-encode every staged clip, applying tempo per file.
+
+    `tempo_by_filename` lets one assembly mix generated and recorded chunks:
+    speeding up a recording the user made themselves is never wanted, while
+    generated speech still gets the project tempo.
+    """
     import os
     # download original file
     local_file_orig = get_local_path_with_download(path)
@@ -404,15 +415,16 @@ def update_tts_audio(path, path_synthesis, custom_speedup=None):
     src_trans_files = sorted(glob.glob(f"{path_synthesis}/*.{src_format}" ))
 
 
-    speedup = custom_speedup or get_params("speedup_value")
-    if speedup != 1.0 :
-        logging.info (f"Changing the speed on {str ( (speedup - 1) * 100 )}%. Consider 'Change Tempo' effect in Audacity for better quality..")
+    default_speedup = custom_speedup or get_params("speedup_value")
+    if default_speedup != 1.0 :
+        logging.info (f"Changing the speed on {str ( (default_speedup - 1) * 100 )}%. Consider 'Change Tempo' effect in Audacity for better quality..")
 
     for infile in src_trans_files:
         if (os.path.getsize(infile) ==0 ): continue
         infile_basename = os.path.basename(infile)
+        speedup = (tempo_by_filename or {}).get(infile_basename, default_speedup)
         outfile = f"{temp_dir_combine}/{infile_basename}"  ## 
-        logging.info (f"Updating {infile} and saving to {outfile}")
+        logging.info (f"Updating {infile} and saving to {outfile} at tempo {speedup}")
 
 
         if speedup != 1.0 :
@@ -1031,94 +1043,671 @@ def prepare_custom_recording_dir(path, user_id, file_name):
         return None
 
 
-def main(path, existing_dir=None, redo_segment=None):
+# ---------------------------------------------------------------------------
+# Per-chunk segment store
+#
+# Audio belongs to a chunk, not to a pipeline run. Synthesis fills gaps in the
+# store, the portal can overwrite any single entry with a recording, and
+# assembly reads the store. Nothing downstream cares which produced a chunk.
+# ---------------------------------------------------------------------------
+
+
+def param_bool(all_params, key, default):
+    value = all_params.get(key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
+def resolve_tempo(all_params, key, default):
+    value = all_params.get(key)
+    if value is None or value == "":
+        return float(default)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        logging.info(f"Invalid {key} value [{value}], using {default}")
+        return float(default)
+
+
+def resolve_project_root(path, path_improved):
+    root = portal_project_dir(path)
+    if root is not None:
+        return Path(root)
+    # Azure runs have no portal project folder; keep the store beside the local
+    # working copy so one code path covers both deployments.
+    return Path(get_local_file_path(path_improved)).parent
+
+
+def load_transcript(path_improved):
+    transcript = json.loads(get_palintext_content(path_improved))
+    if not isinstance(transcript, list):
+        raise ValueError(f"Improved transcript is not a chunk array: [{path_improved}]")
+    return transcript
+
+
+def text_keys(all_params):
+    return (
+        str(all_params.get("improved_text_key") or "imp"),
+        str(all_params.get("translation_text_key") or "dltrans"),
+    )
+
+
+def run_ffmpeg(args):
+    command = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", *args]
+    logging.info(f"Running: {' '.join(command)}")
+    subprocess.run(command, check=True)
+
+
+def parse_chunk_ids(value):
+    if not value:
+        return set()
+    if isinstance(value, str):
+        items = [part.strip() for part in value.replace(",", " ").split() if part.strip()]
+    elif isinstance(value, (list, tuple, set)):
+        items = [str(part).strip() for part in value if str(part).strip()]
+    else:
+        return set()
+    invalid = [item for item in items if not seg.is_chunk_id(item)]
+    if invalid:
+        raise ValueError(f"Invalid chunk id(s): {', '.join(invalid)}")
+    return set(items)
+
+
+def chunk_id_for_segment_key(transcript, segment_key):
+    for chunk in transcript:
+        try:
+            basename = seg.staging_basename(chunk)
+        except ValueError:
+            continue
+        if basename == segment_key:
+            return chunk["chunk_id"]
+    raise ValueError(f"Segment '{segment_key}' not found in improved transcript")
+
+
+def sync_audio_blocks(project_root, transcript, all_params, path_improved):
+    """Mirror the store onto the transcript so every chunk carries its own audio.
+
+    `segments.json` stays authoritative: the transcript is user-editable, so a
+    hand-edit must never be able to strand a file.
+    """
+    index = seg.load_index(project_root)
+    current_voice_hash = seg.voice_hash(all_params)
+    improved_key, translation_key = text_keys(all_params)
+    for chunk in transcript:
+        chunk_id = chunk.get("chunk_id")
+        text = seg.chunk_text(chunk, improved_key, translation_key)
+        entry = seg.segment_entry(index, chunk_id) if chunk_id else None
+        status = seg.segment_status(
+            entry,
+            text=text,
+            current_text_hash=seg.text_hash(text),
+            current_voice_hash=current_voice_hash,
+            audio_exists=seg.audio_path(project_root, entry) is not None,
+        )
+        block = seg.audio_block(entry, status)
+        if block is None:
+            chunk.pop("audio", None)
+        else:
+            chunk["audio"] = block
+    save_json_with_upload(path_improved, transcript)
+
+
+def retire_orphaned_segments(project_root, transcript):
+    """Audio whose chunk is gone is moved aside, not deleted, so an accidental
+    chunk delete in the editor stays recoverable."""
+    index = seg.load_index(project_root)
+    live = {chunk.get("chunk_id") for chunk in transcript}
+    orphans = [chunk_id for chunk_id in list(index.get("segments", {})) if chunk_id not in live]
+    if not orphans:
+        return
+    target = seg.orphan_dir(project_root)
+    target.mkdir(parents=True, exist_ok=True)
+    for chunk_id in orphans:
+        entry = index["segments"].pop(chunk_id)
+        for key in ("file", "raw_file"):
+            relative = entry.get(key)
+            if not relative:
+                continue
+            source = seg.store_dir(project_root) / relative
+            if source.exists():
+                shutil.move(str(source), str(target / source.name))
+        logging.info(f"Retired orphaned segment [{chunk_id}]; its chunk is no longer in the transcript")
+    seg.save_index(project_root, index)
+
+
+def remove_clicks(infile, outfile):
+    """Legacy VAD de-click. `sound_prep()` rewrites its input in place, so it is
+    handed a scratch copy. It needs `webrtcvad`, which is not in the worker
+    image, so a failure here is logged and tolerated."""
+    scratch = outfile.parent / "declick-input.wav"
+    shutil.copyfile(infile, scratch)
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shared_clicks_removal.py")
+    result = subprocess.run(
+        [sys.executable, script, "3", str(scratch), str(outfile)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0 or not outfile.exists() or outfile.stat().st_size == 0:
+        detail = " ".join((result.stderr or "").split())[:200]
+        logging.warning(f"Click removal unavailable, keeping the audio as-is: {detail}")
+        return False
+    return True
+
+
+def convert_recording_to_canonical(infile, outfile, cleanup=True):
+    """Browser upload to canonical ogg, via the legacy recording cleanup chain."""
+    work_dir = outfile.parent / f".ingest-{outfile.stem}"
+    shutil.rmtree(work_dir, ignore_errors=True)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        staged = work_dir / "prepared.wav"
+        # webm/m4a/mp4 in, and the de-click step needs mono 16-bit 48 kHz.
+        run_ffmpeg(["-i", str(infile), "-ac", "1", "-ar", "48000", "-sample_fmt", "s16", str(staged)])
+
+        if cleanup:
+            normalized = work_dir / "normalized.wav"
+            normalize_and_limit_audio(str(staged), str(normalized))
+            staged = normalized
+            declicked = work_dir / "declicked.wav"
+            if remove_clicks(staged, declicked):
+                staged = declicked
+
+        args = ["-i", str(staged)]
+        if cleanup:
+            args += ["-af", "silenceremove=stop_periods=-1:stop_duration=0.2:stop_threshold=-40dB"]
+        args += ["-c:a", "libvorbis", str(outfile)]
+        run_ffmpeg(args)
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def ingest_pending_recordings(project_root, transcript, all_params):
+    """Convert browser uploads the portal parked in `raw/`.
+
+    The portal API image has no ffmpeg, so it stores the upload untouched and
+    leaves the conversion to the worker.
+    """
+    index = seg.load_index(project_root)
+    pending = [
+        (chunk_id, entry)
+        for chunk_id, entry in index.get("segments", {}).items()
+        if entry.get("status") == seg.STATUS_PENDING_INGEST and entry.get("raw_file")
+    ]
+    if not pending:
+        return
+    cleanup = param_bool(all_params, "recording_cleanup", True)
+    store = seg.store_dir(project_root)
+    logging.info(f"Ingesting {len(pending)} uploaded recording(s), cleanup={cleanup}")
+    for chunk_id, entry in pending:
+        raw = store / entry["raw_file"]
+        outfile = store / f"{chunk_id}.{seg.CANONICAL_EXTENSION}"
+        if not raw.exists() or raw.stat().st_size == 0:
+            entry["status"] = seg.STATUS_FAILED
+            entry["error"] = "Uploaded recording is missing or empty"
+            continue
+        try:
+            convert_recording_to_canonical(raw, outfile, cleanup=cleanup)
+        except Exception as exc:
+            outfile.unlink(missing_ok=True)
+            entry["status"] = seg.STATUS_FAILED
+            entry["error"] = f"Recording ingest failed: {exc}"[:300]
+            logging.error(f"Recording ingest failed for [{chunk_id}]: {exc}")
+            continue
+        entry.update(
+            {
+                "file": outfile.name,
+                "source": seg.SOURCE_RECORDING,
+                "status": seg.STATUS_READY,
+                "duration_ms": seg.probe_duration_ms(outfile),
+                "bytes": outfile.stat().st_size,
+                "created_at": seg.now_iso(),
+            }
+        )
+        entry.pop("error", None)
+        logging.info(f"Ingested recording for [{chunk_id}] -> {outfile.name}")
+    seg.save_index(project_root, index)
+
+
+def extract_zip_safely(archive_path, destination):
+    destination_resolved = Path(destination).resolve()
+    with zipfile.ZipFile(archive_path) as archive:
+        for member in archive.infolist():
+            target = (Path(destination) / member.filename).resolve()
+            if destination_resolved not in target.parents and target != destination_resolved:
+                raise ValueError(f"Unsafe path in recordings archive: {member.filename}")
+        archive.extractall(destination)
+
+
+def match_files_to_chunks(files, transcript):
+    """Map loose recording files onto chunks the way the legacy import did:
+    by `start-end`, by `start`, by chunk id, then by position."""
+    by_stem = {}
+    for item in files:
+        by_stem.setdefault(re.sub(r"[^0-9a-zA-Z-]+", "-", item.stem).strip("-").lower(), item)
+    ordered = sorted(files)
+    matched = {}
+    for position, chunk in enumerate(transcript):
+        chunk_id = chunk.get("chunk_id")
+        if not chunk_id:
+            continue
+        candidates = []
+        try:
+            candidates.append(seg.staging_basename(chunk).lower())
+        except ValueError:
+            pass
+        candidates += [str(chunk.get("start") or "").lower(), chunk_id.lower(), f"{position:03d}", str(position)]
+        found = next((by_stem[key] for key in candidates if key in by_stem), None)
+        if found is None and len(ordered) == len(transcript):
+            found = ordered[position]
+        if found is not None:
+            matched[chunk_id] = found
+    return matched
+
+
+def register_raw_recording(project_root, index, chunk_id, source_file, text):
+    raw_target = seg.raw_dir(project_root)
+    raw_target.mkdir(parents=True, exist_ok=True)
+    extension = source_file.suffix.lstrip(".").lower() or "ogg"
+    destination = raw_target / f"{chunk_id}.{extension}"
+    shutil.copyfile(source_file, destination)
+    index.setdefault("segments", {})[chunk_id] = {
+        "raw_file": f"raw/{destination.name}",
+        "source": seg.SOURCE_RECORDING,
+        "status": seg.STATUS_PENDING_INGEST,
+        "text_hash": seg.text_hash(text),
+        "bytes": destination.stat().st_size,
+        "created_at": seg.now_iso(),
+    }
+
+
+def import_recordings_zip(project_root, transcript, all_params):
+    """Bulk import for the project-creation zip upload. Runs once per archive."""
+    relative = str(all_params.get("custom_recordings_zip") or "").strip()
+    if not relative:
+        return
+    archive = Path(project_root) / relative
+    if not archive.exists():
+        logging.info(f"custom_recordings_zip [{archive}] not found, skipping bulk import")
+        return
+    index = seg.load_index(project_root)
+    stat = archive.stat()
+    marker = f"{archive.name}:{int(stat.st_mtime)}:{stat.st_size}"
+    if index.get("imported_zip") == marker:
+        return
+
+    extract_dir = seg.store_dir(project_root) / ".zip-import"
+    shutil.rmtree(extract_dir, ignore_errors=True)
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        extract_zip_safely(archive, extract_dir)
+        files = [
+            item
+            for item in sorted(extract_dir.rglob("*"))
+            if item.is_file() and item.suffix.lstrip(".").lower() in seg.RAW_UPLOAD_EXTENSIONS
+        ]
+        if not files:
+            logging.warning(f"No supported recordings found in [{archive}]")
+            return
+        improved_key, translation_key = text_keys(all_params)
+        matched = match_files_to_chunks(files, transcript)
+        for chunk in transcript:
+            chunk_id = chunk.get("chunk_id")
+            source_file = matched.get(chunk_id)
+            if source_file is None:
+                continue
+            register_raw_recording(
+                project_root, index, chunk_id, source_file,
+                seg.chunk_text(chunk, improved_key, translation_key),
+            )
+        index["imported_zip"] = marker
+        seg.save_index(project_root, index)
+        logging.info(f"Imported {len(matched)} recording(s) from [{archive.name}] into the segment store")
+    finally:
+        shutil.rmtree(extract_dir, ignore_errors=True)
+
+
+def import_existing_audio_dir(project_root, transcript, existing_dir, all_params, source=seg.SOURCE_TTS):
+    """Adopt a pre-store directory of `<start>-<end>.ogg` clips into the store.
+
+    Covers the deprecated `--dir` flag and the Azure custom-recording download,
+    both of which predate the store and name files after timings.
+    """
+    directory = Path(existing_dir)
+    if not directory.is_dir():
+        logging.warning(f"Cannot import audio from [{existing_dir}]: not a directory")
+        return
+    files = [item for item in sorted(directory.glob("*")) if item.is_file() and item.stat().st_size > 0]
+    if not files:
+        logging.warning(f"No audio files to import from [{existing_dir}]")
+        return
+    index = seg.load_index(project_root)
+    store = seg.store_dir(project_root)
+    store.mkdir(parents=True, exist_ok=True)
+    improved_key, translation_key = text_keys(all_params)
+    current_voice_hash = seg.voice_hash(all_params)
+    matched = match_files_to_chunks(files, transcript)
+    for chunk in transcript:
+        chunk_id = chunk.get("chunk_id")
+        source_file = matched.get(chunk_id)
+        if source_file is None:
+            continue
+        text = seg.chunk_text(chunk, improved_key, translation_key)
+        if source == seg.SOURCE_RECORDING:
+            register_raw_recording(project_root, index, chunk_id, source_file, text)
+            continue
+        destination = store / f"{chunk_id}.{seg.CANONICAL_EXTENSION}"
+        shutil.copyfile(source_file, destination)
+        index.setdefault("segments", {})[chunk_id] = {
+            "file": destination.name,
+            "source": seg.SOURCE_TTS,
+            "engine": str(all_params.get("tts_api") or "openai").lower(),
+            "voice": all_params.get("voice"),
+            "duration_ms": seg.probe_duration_ms(destination),
+            "bytes": destination.stat().st_size,
+            # Adopting a file asserts it matches the transcript as it stands.
+            "text_hash": seg.text_hash(text),
+            "voice_hash": current_voice_hash,
+            "created_at": seg.now_iso(),
+            "status": seg.STATUS_READY,
+        }
+    seg.save_index(project_root, index)
+    logging.info(f"Imported {len(matched)} clip(s) from [{existing_dir}] into the segment store")
+
+
+def failed_segment_entry(store, previous, tts_api, exc):
+    """Record the failure without discarding a usable earlier take.
+
+    If the chunk still has audio, the previous status is kept so the build can
+    use it; the attached error is what tells the editor the retry did not work.
+    """
+    entry = dict(previous or {})
+    entry["error"] = str(exc)[:300]
+    entry["failed_at"] = seg.now_iso()
+    existing = entry.get("file")
+    if not existing or not (store / existing).exists() or (store / existing).stat().st_size == 0:
+        entry.update({"source": seg.SOURCE_TTS, "engine": tts_api, "status": seg.STATUS_FAILED})
+    return entry
+
+
+def synthesize_missing_segments(path, project_root, transcript, all_params, forced_ids=None):
+    """Generate audio for chunks that need it, one chunk at a time.
+
+    Without `forced_ids` this is a gap filler: it skips anything already current
+    and never touches a recording. With `forced_ids` it regenerates exactly those
+    chunks, which is what the editor's per-chunk regenerate button sends.
+    """
+    import time
+
+    improved_key, translation_key = text_keys(all_params)
+    voice = get_voice_name(path)
+    tts_api = str(all_params.get("tts_api") or "openai").lower()
+    model = all_params.get("vibevoice_model") if tts_api == "vibevoice" else all_params.get("openai_model_tts")
+    current_voice_hash = seg.voice_hash(all_params)
+    sleep_time = 0.0 if tts_api == "vibevoice" else float(all_params.get("sleep_time_tts") or 0)
+
+    store = seg.store_dir(project_root)
+    store.mkdir(parents=True, exist_ok=True)
+    index = seg.load_index(project_root)
+
+    if forced_ids:
+        known = {chunk.get("chunk_id") for chunk in transcript}
+        unknown = sorted(forced_ids - known)
+        if unknown:
+            raise ValueError(f"Unknown chunk id(s): {', '.join(unknown)}")
+
+    targets = []
+    for chunk in transcript:
+        chunk_id = chunk.get("chunk_id")
+        text = seg.chunk_text(chunk, improved_key, translation_key)
+        if not text:
+            continue
+        if forced_ids:
+            if chunk_id in forced_ids:
+                targets.append((chunk_id, text))
+            continue
+        entry = seg.segment_entry(index, chunk_id)
+        status = seg.segment_status(
+            entry,
+            text=text,
+            current_text_hash=seg.text_hash(text),
+            current_voice_hash=current_voice_hash,
+            audio_exists=seg.audio_path(project_root, entry) is not None,
+        )
+        if seg.needs_synthesis(status, entry):
+            targets.append((chunk_id, text))
+
+    logging.info(
+        f"Synthesizing {len(targets)} of {len(transcript)} chunk(s) with [{tts_api}], voice [{voice}]"
+    )
+    if not targets:
+        return
+
+    from tqdm import tqdm
+
+    failures = []
+    for chunk_id, text in tqdm(targets):
+        outfile = store / f"{chunk_id}.{seg.CANONICAL_EXTENSION}"
+        # Synthesize aside and move into place, so a failed regeneration cannot
+        # destroy or truncate the take that is already there.
+        pending = store / f".{chunk_id}.partial.{seg.CANONICAL_EXTENSION}"
+        pending.unlink(missing_ok=True)
+        try:
+            generate_openai_tts(path=path, text=text, speech_file_path=str(pending), voice=voice)
+            if not pending.exists() or pending.stat().st_size == 0:
+                raise ValueError("TTS produced no audio")
+        except Exception as exc:
+            pending.unlink(missing_ok=True)
+            failures.append(chunk_id)
+            index.setdefault("segments", {})[chunk_id] = failed_segment_entry(
+                store, seg.segment_entry(index, chunk_id), tts_api, exc
+            )
+            seg.save_index(project_root, index)
+            logging.error(f"TTS failed for chunk [{chunk_id}]: {exc}")
+            continue
+        os.replace(pending, outfile)
+        index.setdefault("segments", {})[chunk_id] = {
+            "file": outfile.name,
+            "source": seg.SOURCE_TTS,
+            "engine": tts_api,
+            "voice": voice,
+            "model": model,
+            "duration_ms": seg.probe_duration_ms(outfile),
+            "bytes": outfile.stat().st_size,
+            "text_hash": seg.text_hash(text),
+            "voice_hash": current_voice_hash,
+            "created_at": seg.now_iso(),
+            "status": seg.STATUS_READY,
+        }
+        # The index is the resume point, so it is written per chunk: a crash
+        # costs at most the chunk in flight, never the whole run.
+        seg.save_index(project_root, index)
+        if sleep_time:
+            time.sleep(sleep_time)
+
+    if failures:
+        raise RuntimeError(f"TTS failed for {len(failures)} chunk(s): {', '.join(failures[:8])}")
+
+
+def stage_segments_for_build(project_root, transcript, all_params):
+    """Copy the store into a scratch directory under the timing-based filenames
+    the legacy assembler globs for. Retiming a chunk is then just a rename."""
+    index = seg.load_index(project_root)
+    current_voice_hash = seg.voice_hash(all_params)
+    improved_key, translation_key = text_keys(all_params)
+    tts_tempo = resolve_tempo(all_params, "voiceover_tempo", get_params("speedup_value"))
+    recording_tempo = resolve_tempo(all_params, "recording_tempo", 1.0)
+
+    staging = Path(create_timestamped_directory(str(seg.store_dir(project_root) / ".staging")))
+    tempo_by_filename = {}
+    claimed = {}
+    skipped = []
+    stale = []
+
+    for chunk in transcript:
+        chunk_id = chunk.get("chunk_id")
+        text = seg.chunk_text(chunk, improved_key, translation_key)
+        entry = seg.segment_entry(index, chunk_id) if chunk_id else None
+        resolved = seg.audio_path(project_root, entry)
+        status = seg.segment_status(
+            entry,
+            text=text,
+            current_text_hash=seg.text_hash(text),
+            current_voice_hash=current_voice_hash,
+            audio_exists=resolved is not None,
+        )
+        if status == seg.STATUS_SKIPPED:
+            continue
+        if resolved is None or status in (seg.STATUS_MISSING, seg.STATUS_FAILED, seg.STATUS_PENDING_INGEST):
+            skipped.append(f"{chunk_id} ({status})")
+            continue
+        if status == seg.STATUS_STALE:
+            # Outdated audio still beats a silent hole in the mix, but the user
+            # should not have to diff the result to find out it happened.
+            stale.append(chunk_id)
+        basename = seg.staging_basename(chunk)
+        if basename in claimed:
+            raise ValueError(
+                f"Chunks [{claimed[basename]}] and [{chunk_id}] both map to timing '{basename}'. "
+                "Assembly is keyed on timings, so give them distinct start/end values."
+            )
+        claimed[basename] = chunk_id
+        destination = staging / f"{basename}.{seg.CANONICAL_EXTENSION}"
+        shutil.copyfile(resolved, destination)
+        is_recording = (entry or {}).get("source") == seg.SOURCE_RECORDING
+        tempo_by_filename[destination.name] = recording_tempo if is_recording else tts_tempo
+
+    if skipped:
+        logging.warning(
+            f"Assembling without {len(skipped)} chunk(s) that have no usable audio: {', '.join(skipped[:8])}"
+        )
+    if stale:
+        logging.warning(
+            f"Assembling {len(stale)} chunk(s) whose audio predates the current text: {', '.join(stale[:8])}. "
+            "Run the tts stage to refresh them."
+        )
+    if not claimed:
+        raise ValueError("No chunk audio available to assemble. Generate or record segments first.")
+    logging.info(f"Staged {len(claimed)} segment(s) for assembly in [{staging}]")
+    return staging, tempo_by_filename
+
+
+def build_voiceover(path_mp3, project_root, transcript, all_params):
+    staging, tempo_by_filename = stage_segments_for_build(project_root, transcript, all_params)
+    try:
+        temp_dir_combine = update_tts_audio(path_mp3, str(staging), tempo_by_filename=tempo_by_filename)
+        shift_seconds = None
+        raw_shift = all_params.get("voiceover_shift")
+        if raw_shift not in (None, ""):
+            try:
+                shift_seconds = float(raw_shift)
+            except (TypeError, ValueError):
+                logging.info(f"Invalid voiceover_shift value, using default: {raw_shift}")
+        logging.info(f"combinne_with_original_audio({path_mp3}, {temp_dir_combine})")
+        combinne_with_original_audio(path_mp3, temp_dir_combine, shift_seconds=shift_seconds)
+        logging.info("combinne_with_original_audio finished")
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def clear_voiceover_chunks(path, project_root):
+    """A scoped rerun must not silently scope the next full run."""
+    targets = [Path(project_root) / "config" / "params.json", Path(naming_convention(path, "params"))]
+    for target in targets:
+        if not target.exists():
+            continue
+        try:
+            data = json.loads(target.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(data, dict) or "voiceover_chunks" not in data:
+            continue
+        data.pop("voiceover_chunks")
+        target.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def main(path, existing_dir=None, redo_segment=None, mode="all", chunk_ids=None):
 
     setup_logging_with_appinsights(path)
 
     path_mp3 = naming_convention(path, "mp3")
-    project_params = read_project_params(path)
-    custom_recording = parse_legacy_bool(project_params.get("custom_recording", False))
-    custom_speedup = None
-    voiceover_tempo = project_params.get("voiceover_tempo")
-    if voiceover_tempo is not None:
-        try:
-            custom_speedup = float(voiceover_tempo)
-        except (TypeError, ValueError):
-            logging.info(f"Invalid voiceover_tempo value, using default: {voiceover_tempo}")
-
-    if custom_recording:
-        custom_speedup = 1
-        user_id = project_params.get("user_id", "unknown")
-        file_name = project_params.get("filename", "unknown")
-        logging.info(f"custom_recording for [{user_id=}] [{file_name=}] [{custom_speedup=}]")
-        existing_dir = prepare_custom_recording_dir(path, user_id, file_name)
-
-    # Always load the improved transcript — needed for full generation and redo.
     path_improved = naming_convention(path, "improved")
-    import json
-    transcript_improved = json.loads(get_palintext_content(path_improved))
+    project_params = read_project_params(path)
+    all_params = get_all_params(path=path)
+    project_root = resolve_project_root(path, path_improved)
+    seg.store_dir(project_root).mkdir(parents=True, exist_ok=True)
+    logging.info(f"Voiceover mode [{mode}], segment store [{seg.store_dir(project_root)}]")
+
+    transcript = load_transcript(path_improved)
+    if seg.assign_chunk_ids(transcript):
+        logging.info("Assigned stable chunk ids to the improved transcript")
+        save_json_with_upload(path_improved, transcript)
+
+    retire_orphaned_segments(project_root, transcript)
 
     if existing_dir:
-        temp_dir = existing_dir
-        logging.info(f"Generated audio found in directory [{temp_dir}]")
+        logging.warning("--dir is deprecated; importing its contents into the segment store instead")
+        import_existing_audio_dir(project_root, transcript, existing_dir, all_params)
 
-        if redo_segment:
-            # Regenerate only the requested segment file then fall through to reassembly.
-            transName = get_params("improved_text_key")
-            voice = get_voice_name(path)
-            target = f"{redo_segment}.ogg"
-            chunk = next(
-                (c for c in transcript_improved
-                 if f"{c.get('start', '')}-{c.get('end', '')}" == redo_segment),
-                None,
+    # Azure deployments still deliver recordings as a storage-account download.
+    if parse_legacy_bool(project_params.get("custom_recording", False)) and file_from_sta(path):
+        legacy_dir = prepare_custom_recording_dir(
+            path, project_params.get("user_id", "unknown"), project_params.get("filename", "unknown")
+        )
+        if legacy_dir:
+            import_existing_audio_dir(
+                project_root, transcript, legacy_dir, all_params, source=seg.SOURCE_RECORDING
             )
-            if chunk is None:
-                raise ValueError(f"Segment '{redo_segment}' not found in improved transcript")
-            audio_file_path = f"{temp_dir}/{target}"
-            logging.info(f"Re-generating segment {redo_segment} → {audio_file_path}")
-            generate_openai_tts(path=path, text=chunk[transName], speech_file_path=audio_file_path, voice=voice)
-            logging.info(f"Segment {redo_segment} regenerated; re-assembling…")
-    else:
-        local_file = get_local_file_path(path_improved)
-        temp_dir = create_timestamped_directory(local_file)
-        logging.info(f"Generating audio based on file : [{path_improved}] in directory [{temp_dir}]")
-        tts(transcript_improved, temp_dir, path) # TODO: add option to use ElevenLabs TTS API based on user choice - just pass path
 
-    temp_dir_combine = update_tts_audio(path_mp3, temp_dir, custom_speedup=custom_speedup)
+    import_recordings_zip(project_root, transcript, all_params)
+    ingest_pending_recordings(project_root, transcript, all_params)
 
-    logging.info(f"combinne_with_original_audio({path_mp3}, {temp_dir_combine})")
-    shift_seconds = None
-    if "voiceover_shift" in project_params:
+    forced = set(chunk_ids or []) | parse_chunk_ids(all_params.get("voiceover_chunks"))
+    if redo_segment:
+        logging.warning("--redo-segment is deprecated; use --mode synthesize --chunks <chunk_id>")
+        forced.add(chunk_id_for_segment_key(transcript, redo_segment))
+
+    if mode in ("synthesize", "all"):
         try:
-            shift_seconds = float(project_params.get("voiceover_shift"))
-        except (TypeError, ValueError):
-            logging.info(f"Invalid voiceover_shift value, using default: {project_params.get('voiceover_shift')}")
+            synthesize_missing_segments(path, project_root, transcript, all_params, forced_ids=forced or None)
+        finally:
+            # Even a failed run should leave the transcript describing what exists.
+            sync_audio_blocks(project_root, transcript, all_params, path_improved)
+        clear_voiceover_chunks(path, project_root)
+    else:
+        sync_audio_blocks(project_root, transcript, all_params, path_improved)
 
-    combinne_with_original_audio(path_mp3, temp_dir_combine, shift_seconds=shift_seconds)
-
-
-    logging.info(f"combinne_with_original_audio finished")
-
-
-    pass
-
-
+    if mode in ("build", "all"):
+        build_voiceover(path_mp3, project_root, transcript, all_params)
 
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('-p', '--path', type=str, required=True, help="Path to the mp3 file")
-    parser.add_argument('-d', '--dir', type=str, required=False, help="directory to saved synthesized files", default=None)
+    parser.add_argument(
+        '--mode', type=str, choices=['all', 'synthesize', 'build'], default='all',
+        help="synthesize: fill the segment store only. build: assemble from the store only.",
+    )
+    parser.add_argument(
+        '--chunks', type=str, required=False, default=None,
+        help="Comma-separated chunk ids to regenerate, e.g. 'c012,c037'. Implies forced regeneration.",
+    )
+    parser.add_argument(
+        '-d', '--dir', type=str, required=False, default=None,
+        help="Deprecated. A pre-store synthesis directory to import into the segment store.",
+    )
     parser.add_argument(
         '--redo-segment', type=str, required=False, default=None,
-        help="Re-generate a single segment and re-assemble (e.g. '0738-0749'). Requires --dir.",
+        help="Deprecated alias for --chunks, keyed on '<start>-<end>' instead of a chunk id.",
     )
     args = parser.parse_args()
-    if args.redo_segment and not args.dir:
-        parser.error("--redo-segment requires --dir pointing at the existing synthesis directory")
-    main(args.path, args.dir, redo_segment=args.redo_segment)
-
-
-
-    pass
+    main(
+        args.path,
+        args.dir,
+        redo_segment=args.redo_segment,
+        mode=args.mode,
+        chunk_ids=parse_chunk_ids(args.chunks),
+    )

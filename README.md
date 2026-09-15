@@ -256,6 +256,17 @@ If **VibeVoice (local)** is missing from the voiceover engine picker, the prebui
 under `apps/web` newer than the latest tag (`git log <latest-tag>..HEAD -- apps/web`); if
 so, run from source instead of pulling images — see [Local Source Run](#local-source-run).
 
+### Per-chunk voiceover: generate or record
+
+Voiceover audio belongs to a chunk, not to a pipeline run. In the improved-transcript editor
+each chunk has its own record / play / regenerate / delete controls, and a badge saying
+whether its audio was generated, recorded, or has gone stale because the text changed.
+
+That makes three things possible that an all-or-nothing run does not: regenerate a single bad
+chunk without redoing the episode, record a chunk in your own voice while the rest stays
+generated, and reassemble the final mix without any synthesis. See
+[docs/local-tts-vibevoice.md](docs/local-tts-vibevoice.md#fixing-one-chunk-without-redoing-the-episode).
+
 ### Prebuilt Images From Repo Checkout
 
 ```bash

@@ -16,15 +16,65 @@ const state = {
   error: "",
 };
 
+// Per-chunk audio, kept outside `state` because it is owned by the worker and
+// refreshed on its own schedule.
+const segments = {
+  byId: new Map(),
+  available: false,
+  busy: false,
+  jobKind: null,
+  recordingId: null,
+  playingId: null,
+  pendingId: null,
+};
+
+const SEGMENT_LABELS = {
+  ready: "Generated",
+  stale: "Text changed since generation",
+  missing: "No audio",
+  skipped: "No text",
+  failed: "Failed",
+  pending_ingest: "Recorded, not yet processed",
+};
+
+const RECORDER_MIME_TYPES = [
+  "audio/webm;codecs=opus",
+  "audio/webm",
+  "audio/ogg;codecs=opus",
+  "audio/ogg",
+];
+
+let recorder = null;
+let recorderChunks = [];
+let recorderMime = "audio/webm";
+let pollTimer = null;
+let playbackObjectUrl = null;
+let suppressPlayerError = false;
+
+// One player for the page: `render()` replaces the whole workspace, so an
+// <audio> inside a chunk card would be destroyed mid-playback.
+const player = typeof Audio === "function" ? new Audio() : null;
+
 async function api(path, options = {}) {
   const response = await fetch(path, options);
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(text || response.statusText);
+    throw new Error(apiErrorMessage(text) || response.statusText);
   }
   const contentType = response.headers.get("content-type") || "";
   if (contentType.includes("application/json")) return response.json();
   return response.text();
+}
+
+function apiErrorMessage(text) {
+  // FastAPI wraps every error as {"detail": "..."}; showing the raw JSON helps nobody.
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed.detail === "string") return parsed.detail;
+  } catch {
+    // Not JSON, fall through to the raw body.
+  }
+  return text;
 }
 
 function escapeHtml(value) {
@@ -42,7 +92,11 @@ function blankChunk(seed = {}) {
 }
 
 function normalizeChunk(item) {
+  // Spread first: the worker owns `chunk_id` and `audio` on every chunk, and the
+  // pipeline also carries fields this editor never shows, such as `dltrans`.
+  // Rebuilding from a fixed field list would delete all of them on save.
   return {
+    ...item,
     start: String(item.start ?? ""),
     end: String(item.end ?? ""),
     speaker: String(item.speaker ?? ""),
@@ -52,11 +106,26 @@ function normalizeChunk(item) {
 }
 
 function isChunkArray(data) {
-  return Array.isArray(data) && data.every((item) => item && typeof item === "object" && "start" in item && "end" in item && "text" in item && "imp" in item);
+  // `end` is genuinely optional: the assembler derives a missing end from the
+  // next chunk's start, and real transcripts ship chunks without one.
+  return (
+    Array.isArray(data) &&
+    data.length > 0 &&
+    data.every((item) => item && typeof item === "object" && "start" in item && ("imp" in item || "text" in item))
+  );
 }
 
 function serializeChunks(chunks) {
-  return JSON.stringify(chunks, null, 2);
+  // An empty optional field means absent. Writing `"end": ""` back would make
+  // the assembler build the filename `0738-.ogg` and drop the chunk from the mix.
+  const cleaned = chunks.map((chunk) => {
+    const copy = { ...chunk };
+    for (const field of ["end", "speaker"]) {
+      if (copy[field] === "") delete copy[field];
+    }
+    return copy;
+  });
+  return JSON.stringify(cleaned, null, 2);
 }
 
 function setDirty(value) {
@@ -99,6 +168,293 @@ function deleteChunk(index) {
   render();
 }
 
+/* ----------------------------- Segments ----------------------------- */
+
+function segmentInfo(chunk) {
+  return (chunk && chunk.chunk_id && segments.byId.get(chunk.chunk_id)) || null;
+}
+
+function segmentLabel(info) {
+  if (!info) return "No audio";
+  if (info.status === "ready" && info.source === "recording") return "Recorded";
+  return SEGMENT_LABELS[info.status] || info.status;
+}
+
+function segmentTone(info) {
+  if (!info) return "";
+  if (info.status === "failed") return "danger";
+  if (info.status === "stale" || info.status === "pending_ingest") return "warning";
+  if (info.status === "ready") return "ok";
+  return "";
+}
+
+function formatDuration(ms) {
+  if (!ms && ms !== 0) return "";
+  const total = Math.round(ms / 1000);
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
+function extensionForMime(mime) {
+  if (!mime) return "webm";
+  if (mime.includes("ogg")) return "ogg";
+  if (mime.includes("mp4")) return "m4a";
+  if (mime.includes("mpeg")) return "mp3";
+  if (mime.includes("wav")) return "wav";
+  return "webm";
+}
+
+async function loadSegments() {
+  if (!projectId) return;
+  try {
+    const payload = await api(`/api/projects/${projectId}/segments`);
+    segments.byId = new Map((payload.segments || []).map((item) => [item.chunk_id, item]));
+    segments.available = true;
+    segments.busy = Boolean(payload.busy);
+    segments.jobKind = payload.job_kind || null;
+  } catch {
+    // A transcript the editor can only show as raw JSON has no per-chunk audio.
+    segments.available = false;
+    segments.byId = new Map();
+  }
+}
+
+function segmentSummary() {
+  if (!segments.available) return "";
+  const counts = { ready: 0, recorded: 0, stale: 0, missing: 0, failed: 0 };
+  for (const info of segments.byId.values()) {
+    if (info.status === "ready") counts[info.source === "recording" ? "recorded" : "ready"] += 1;
+    else if (info.status === "stale") counts.stale += 1;
+    else if (info.status === "failed") counts.failed += 1;
+    else if (info.status === "missing") counts.missing += 1;
+  }
+  const parts = [];
+  if (counts.ready) parts.push(`${counts.ready} generated`);
+  if (counts.recorded) parts.push(`${counts.recorded} recorded`);
+  if (counts.stale) parts.push(`${counts.stale} stale`);
+  if (counts.missing) parts.push(`${counts.missing} missing`);
+  if (counts.failed) parts.push(`${counts.failed} failed`);
+  return parts.join(" \u00b7 ");
+}
+
+// Recording and regeneration both stamp the chunk's saved text, so unsaved edits
+// would produce audio that is marked stale the moment it lands.
+function segmentActionsLocked() {
+  return segments.busy || state.dirty || state.isSaving;
+}
+
+function lockReason() {
+  if (segments.busy) return "A job is running for this project";
+  if (state.dirty || state.isSaving) return "Save your changes first";
+  return "";
+}
+
+function segmentRowHtml(chunk) {
+  if (!segments.available || !chunk.chunk_id) return "";
+  const chunkId = chunk.chunk_id;
+  const info = segmentInfo(chunk);
+  const isRecording = segments.recordingId === chunkId;
+  const isPlaying = segments.playingId === chunkId;
+  const isPending = segments.pendingId === chunkId;
+  const otherRecording = Boolean(segments.recordingId) && !isRecording;
+  const locked = segmentActionsLocked() || isPending || otherRecording;
+  const hasAudio = Boolean(info && info.has_audio);
+  const hasText = Boolean(info && info.status !== "skipped");
+  const reason = lockReason();
+  const duration = formatDuration(info && info.duration_ms);
+
+  return `
+    <div class="segment-row" data-segment="${escapeHtml(chunkId)}">
+      <button type="button" class="segment-button${isRecording ? " recording" : ""}" data-segment-action="record"
+        title="${isRecording ? "Stop recording" : "Record this chunk"}" ${locked && !isRecording ? "disabled" : ""}>
+        ${isRecording ? "\u23F9" : "\uD83C\uDFA4"}
+      </button>
+      <button type="button" class="segment-button" data-segment-action="play"
+        title="Play" ${!hasAudio || isRecording ? "disabled" : ""}>${isPlaying ? "\u23F8" : "\u25B6"}</button>
+      <button type="button" class="segment-button" data-segment-action="regenerate"
+        title="Regenerate this chunk with TTS" ${locked || !hasText ? "disabled" : ""}>\u27F3</button>
+      <button type="button" class="segment-button danger" data-segment-action="delete"
+        title="Delete this chunk's audio" ${!hasAudio || locked ? "disabled" : ""}>\uD83D\uDDD1</button>
+      <span class="segment-status ${segmentTone(info)}">${escapeHtml(segmentLabel(info))}</span>
+      ${duration ? `<span class="muted segment-meta">${escapeHtml(duration)}</span>` : ""}
+      ${isPending ? '<span class="muted segment-meta">Working\u2026</span>' : ""}
+      ${info && info.error ? `<span class="segment-meta danger-text">${escapeHtml(info.error)}</span>` : ""}
+      ${locked && !isPending && reason ? `<span class="muted segment-meta">${escapeHtml(reason)}</span>` : ""}
+    </div>
+  `;
+}
+
+async function uploadRecording(chunkId, blob) {
+  segments.pendingId = chunkId;
+  render();
+  try {
+    const form = new FormData();
+    form.append("file", blob, `${chunkId}.${extensionForMime(blob.type)}`);
+    await api(`/api/projects/${projectId}/segments/${chunkId}/audio`, { method: "PUT", body: form });
+    await loadSegments();
+    setMessage("Recording saved.");
+  } catch (error) {
+    setError(error.message);
+  } finally {
+    segments.pendingId = null;
+    render();
+  }
+}
+
+async function startRecording(chunkId) {
+  if (segments.recordingId) return;
+  if (!navigator.mediaDevices || typeof MediaRecorder === "undefined") {
+    setError("This browser cannot record audio.");
+    render();
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mime = RECORDER_MIME_TYPES.find((candidate) => MediaRecorder.isTypeSupported(candidate));
+    recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+    recorderMime = recorder.mimeType || mime || "audio/webm";
+    recorderChunks = [];
+    recorder.ondataavailable = (event) => {
+      if (event.data && event.data.size > 0) recorderChunks.push(event.data);
+    };
+    recorder.onstop = async () => {
+      stream.getTracks().forEach((track) => track.stop());
+      const blob = new Blob(recorderChunks, { type: recorderMime });
+      recorder = null;
+      recorderChunks = [];
+      segments.recordingId = null;
+      if (blob.size > 0) await uploadRecording(chunkId, blob);
+      else render();
+    };
+    recorder.start();
+    segments.recordingId = chunkId;
+    setError("");
+    render();
+  } catch {
+    setError("Microphone access denied.");
+    render();
+  }
+}
+
+function stopRecording() {
+  if (!recorder) {
+    segments.recordingId = null;
+    render();
+    return;
+  }
+  recorder.stop();
+}
+
+function releasePlaybackUrl() {
+  if (!playbackObjectUrl) return;
+  URL.revokeObjectURL(playbackObjectUrl);
+  playbackObjectUrl = null;
+}
+
+async function togglePlayback(chunkId) {
+  if (!player) return;
+  if (segments.playingId === chunkId && !player.paused) {
+    player.pause();
+    return;
+  }
+  try {
+    const response = await fetch(`/api/projects/${projectId}/segments/${chunkId}/audio`);
+    if (!response.ok) throw new Error(apiErrorMessage(await response.text()) || "Playback failed");
+    const blob = await response.blob();
+    releasePlaybackUrl();
+    playbackObjectUrl = URL.createObjectURL(blob);
+    player.src = playbackObjectUrl;
+    player.currentTime = 0;
+    segments.playingId = chunkId;
+    render();
+    await player.play();
+  } catch (error) {
+    segments.playingId = null;
+    setError(error.message || "Playback failed.");
+    render();
+  }
+}
+
+async function deleteSegmentAudio(chunkId) {
+  if (!confirm(`Delete audio for chunk ${chunkId}?`)) return;
+  segments.pendingId = chunkId;
+  render();
+  try {
+    if (segments.playingId === chunkId && player) {
+      suppressPlayerError = true;
+      player.pause();
+      player.removeAttribute("src");
+      segments.playingId = null;
+      releasePlaybackUrl();
+    }
+    await api(`/api/projects/${projectId}/segments/${chunkId}/audio`, { method: "DELETE" });
+    await loadSegments();
+    setMessage("Audio deleted.");
+  } catch (error) {
+    setError(error.message);
+  } finally {
+    segments.pendingId = null;
+    render();
+  }
+}
+
+async function regenerateSegment(chunkId) {
+  segments.pendingId = chunkId;
+  render();
+  try {
+    await api(`/api/projects/${projectId}/segments/${chunkId}/regenerate`, { method: "POST" });
+    setMessage(`Queued regeneration of ${chunkId}.`);
+    await loadSegments();
+    scheduleStatusPoll();
+  } catch (error) {
+    setError(error.message);
+  } finally {
+    segments.pendingId = null;
+    render();
+  }
+}
+
+async function queueVoiceover(endpoint, successMessage) {
+  if (!projectId) return;
+  setError("");
+  setMessage("");
+  try {
+    if (state.dirty) await save();
+    await api(`/api/projects/${projectId}/${endpoint}`, { method: "POST" });
+    setMessage(successMessage);
+    await loadSegments();
+    scheduleStatusPoll();
+  } catch (error) {
+    setError(error.message);
+  } finally {
+    render();
+  }
+}
+
+function scheduleStatusPoll() {
+  if (pollTimer) return;
+  pollTimer = setInterval(async () => {
+    const stillBusy = await refreshStatus();
+    if (!stillBusy) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+    render();
+  }, 4000);
+}
+
+async function refreshStatus() {
+  try {
+    const project = await api(`/api/projects/${projectId}`);
+    const status = project.status || {};
+    const kind = status.job_kind ? ` | ${status.job_kind}` : "";
+    state.projectStatus = `${status.state || "unknown"} | ${status.stage || "unknown"}${kind} | ${Number(status.progress || 0)}%`;
+    await loadSegments();
+    return segments.busy;
+  } catch {
+    return false;
+  }
+}
+
 function loadImprovedBody(raw) {
   let parsed = null;
   try {
@@ -128,6 +484,8 @@ function workspaceHtml() {
   const downloadHref = improvedFilename ? `/api/projects/${encodeURIComponent(projectId)}/download/${encodeURIComponent(improvedFilename)}` : "#";
   const openHref = improvedFilename ? `/improved.html?project=${encodeURIComponent(projectId)}&file=${encodeURIComponent(improvedFilename)}` : "#";
   const chunkCount = state.rawFallback === null ? `${state.chunks.length} chunks` : "raw JSON";
+  const summary = segmentSummary();
+  const segmentSummaryBadge = summary ? `<span class="badge">${escapeHtml(summary)}</span>` : "";
 
   return `
     <div class="editor-head">
@@ -147,9 +505,15 @@ function workspaceHtml() {
       <button type="button" id="add-chunk" class="secondary" ${state.isSaving || state.rawFallback !== null ? "disabled" : ""}>Add chunk</button>
       <a class="artifact" href="${downloadHref}" ${improvedFilename ? "" : 'aria-disabled="true" tabindex="-1"'} download>Download</a>
       <a class="artifact" href="${openHref}" ${improvedFilename ? "" : 'aria-disabled="true" tabindex="-1"'}>Open editor</a>
-      <button type="button" id="start-voiceover" class="secondary" ${state.isSaving ? "disabled" : ""}>Start voiceover</button>
+      <button type="button" id="start-voiceover" class="secondary" ${state.isSaving || segments.busy ? "disabled" : ""}>Start voiceover</button>
+      ${segments.available ? `
+        <button type="button" id="generate-missing" class="secondary" ${state.isSaving || segments.busy ? "disabled" : ""}>Generate missing</button>
+        <button type="button" id="build-voiceover" class="secondary" ${state.isSaving || segments.busy ? "disabled" : ""}>Build voiceover</button>
+      ` : ""}
       <a class="secondary" href="/">Back</a>
       <span class="badge">${chunkCount}</span>
+      ${segmentSummaryBadge}
+      ${segments.busy ? '<span class="badge warning">Job running</span>' : ""}
       ${state.dirty ? '<span class="badge warning">Unsaved changes</span>' : ""}
     </div>
 
@@ -191,6 +555,7 @@ function workspaceHtml() {
                 <textarea data-field="imp" spellcheck="false">${escapeHtml(chunk.imp)}</textarea>
               </label>
             </div>
+            ${segmentRowHtml(chunk)}
             <div class="chunk-actions">
               <button type="button" class="secondary" data-action="insert-before">+ Before</button>
               <button type="button" class="secondary" data-action="insert-after">+ After</button>
@@ -243,6 +608,36 @@ function bindWorkspace() {
     });
   }
 
+  const generateMissingButton = document.querySelector("#generate-missing");
+  if (generateMissingButton) {
+    generateMissingButton.addEventListener("click", () => {
+      void queueVoiceover("voiceover/synthesize", "Generation of missing chunks queued.");
+    });
+  }
+
+  const buildVoiceoverButton = document.querySelector("#build-voiceover");
+  if (buildVoiceoverButton) {
+    buildVoiceoverButton.addEventListener("click", () => {
+      void queueVoiceover("voiceover/build", "Voiceover assembly queued.");
+    });
+  }
+
+  workspace.querySelectorAll("[data-segment]").forEach((row) => {
+    const chunkId = row.getAttribute("data-segment");
+    row.querySelectorAll("[data-segment-action]").forEach((button) => {
+      const action = button.getAttribute("data-segment-action");
+      button.addEventListener("click", () => {
+        if (action === "record") {
+          if (segments.recordingId === chunkId) stopRecording();
+          else void startRecording(chunkId);
+        }
+        if (action === "play") void togglePlayback(chunkId);
+        if (action === "regenerate") void regenerateSegment(chunkId);
+        if (action === "delete") void deleteSegmentAudio(chunkId);
+      });
+    });
+  });
+
   if (rawEditor) {
     rawEditor.addEventListener("input", () => {
       state.rawFallback = rawEditor.value;
@@ -292,6 +687,11 @@ async function save() {
     });
     state.dirty = false;
     state.message = "Saved.";
+    // The API stamps stable chunk ids onto anything newly inserted, so re-read
+    // rather than leaving memory and disk holding different chunks.
+    await loadSegments();
+    const refreshed = await api(`/api/projects/${projectId}/files/${encodeURIComponent(improvedFilename)}`);
+    loadImprovedBody(refreshed);
   } catch (error) {
     state.error = error.message;
   } finally {
@@ -310,6 +710,8 @@ async function startVoiceover() {
     await save();
     await api(`/api/projects/${projectId}/voiceover`, { method: "POST" });
     state.message = "Voiceover queued.";
+    await loadSegments();
+    scheduleStatusPoll();
   } catch (error) {
     state.error = error.message;
   } finally {
@@ -330,7 +732,8 @@ async function load() {
     const project = await api(`/api/projects/${projectId}`);
     const status = project.status || {};
     state.projectLabel = project.metadata?.source_filename || projectId;
-    state.projectStatus = `${status.state || "unknown"} | ${status.stage || "unknown"} | ${Number(status.progress || 0)}%`;
+    const kind = status.job_kind ? ` | ${status.job_kind}` : "";
+    state.projectStatus = `${status.state || "unknown"} | ${status.stage || "unknown"}${kind} | ${Number(status.progress || 0)}%`;
 
     if (!improvedFilename) {
       const fileInfo = await api(`/api/projects/${projectId}/improved-file`);
@@ -340,10 +743,15 @@ async function load() {
       throw new Error("Improved transcript not found.");
     }
 
+    // Before reading the transcript: this assigns and persists stable chunk ids,
+    // and reading afterwards is what puts them in memory for the next save.
+    await loadSegments();
+
     const raw = await api(`/api/projects/${projectId}/files/${encodeURIComponent(improvedFilename)}`);
     loadImprovedBody(raw);
     state.error = "";
     state.message = "";
+    if (segments.busy) scheduleStatusPoll();
   } catch (error) {
     state.error = error.message;
   } finally {
@@ -364,6 +772,28 @@ window.addEventListener("keydown", (event) => {
     void save();
   }
 });
+
+if (player) {
+  player.addEventListener("ended", () => {
+    segments.playingId = null;
+    render();
+  });
+  player.addEventListener("pause", () => {
+    if (!segments.playingId) return;
+    segments.playingId = null;
+    render();
+  });
+  player.addEventListener("error", () => {
+    if (suppressPlayerError) {
+      suppressPlayerError = false;
+      return;
+    }
+    if (!segments.playingId) return;
+    segments.playingId = null;
+    setError("Unable to play this chunk's audio.");
+    render();
+  });
+}
 
 render();
 load().catch((error) => {

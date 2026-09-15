@@ -68,6 +68,49 @@ list repopulates from `GET /v1/voices` on your running server, so your own clone
 appear there — no file editing required. If the server is unreachable, the field falls back
 to free text so you can still type a voice id and submit.
 
+## Fixing one chunk without redoing the episode
+
+Audio is stored per chunk, not per run. Open a project's improved transcript in the editor
+and every chunk gets its own audio row:
+
+| Control | What it does |
+| --- | --- |
+| 🎤 | Record this chunk yourself, straight from the browser |
+| ▶ | Play whatever audio the chunk currently has |
+| ⟳ | Regenerate just this chunk with the project's TTS engine |
+| 🗑 | Delete this chunk's audio |
+
+The badge next to the controls says where the audio came from and whether it is current:
+*Generated*, *Recorded*, *Text changed since generation*, *No audio*, or *Failed*.
+
+Two toolbar buttons complete the loop:
+
+- **Generate missing** synthesizes only the chunks that are missing or stale. On a 200-chunk
+  episode with one bad chunk, that is one TTS call rather than 200.
+- **Build voiceover** assembles the final mix from whatever audio exists, with no synthesis
+  at all.
+
+Recording and generating mix freely in one project: generate the episode, re-record the three
+chunks the model mangled, then build. Recordings are never overwritten by a *Generate missing*
+run, and changing the narrator voice does not invalidate them. Generated chunks get the
+project's `voiceover_tempo` (legacy default `1.2`); recordings are left at `1.0`, overridable
+with the `recording_tempo` param.
+
+Editing a chunk's text marks that one chunk stale and leaves the rest alone. Save before
+recording or regenerating: both stamp the chunk's saved text, so unsaved edits would produce
+audio that is marked stale the moment it lands. The editor disables those buttons until you do.
+
+Behind the scenes the audio lives in `<project>/work/segments/`, one `<chunk_id>.ogg` per
+chunk, indexed by `work/segments/segments.json` and mirrored onto each chunk in the improved
+transcript as an `audio` block. Deleting a chunk moves its audio to `work/segments/orphaned/`
+rather than destroying it.
+
+Browser recordings are converted by the worker, not the portal API, because only the worker
+image carries ffmpeg. A recording is therefore playable immediately but shows as *Recorded,
+not yet processed* until the next run converts and cleans it up. The click-removal step of
+that cleanup needs `webrtcvad`, which is not installed in the worker image; without it the
+ffmpeg pause trim still runs and the step is skipped with a warning.
+
 ## Expected throughput
 
 Synthesis runs roughly **2.4× slower than real time** on an M-series Mac at fp16, and the
