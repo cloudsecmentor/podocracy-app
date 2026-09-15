@@ -107,9 +107,14 @@ rather than destroying it.
 
 Browser recordings are converted by the worker, not the portal API, because only the worker
 image carries ffmpeg. A recording is therefore playable immediately but shows as *Recorded,
-not yet processed* until the next run converts and cleans it up. The click-removal step of
-that cleanup needs `webrtcvad`, which is not installed in the worker image; without it the
-ffmpeg pause trim still runs and the step is skipped with a warning.
+not yet processed* until the next run converts and cleans it up. Cleanup is loudness
+normalization, then voice-activity click and long-pause removal, then an ffmpeg trim of the
+shorter pauses. Set `recording_cleanup` to `false` on a project to keep raw takes as recorded.
+
+The voice-activity step is deliberately non-fatal. If it crashes, or returns audio that is
+empty or less than a quarter of what went in, the log says so and the un-declicked audio is
+kept: a recording the user cannot cheaply redo is worth more than a clean one, and an
+aggressive voice-activity verdict on a quiet take would otherwise replace it with silence.
 
 ## Expected throughput
 

@@ -440,6 +440,92 @@ if __name__ == "__main__":
     unittest.main()
 
 
+def write_wav(path, seconds, sample_rate=48000, amplitude=0):
+    import math
+    import struct
+    import wave
+
+    frames = int(seconds * sample_rate)
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate)
+        samples = (
+            int(amplitude * math.sin(2 * math.pi * 220 * index / sample_rate)) for index in range(frames)
+        )
+        handle.writeframes(b"".join(struct.pack("<h", value) for value in samples))
+
+
+@unittest.skipIf(voiceover is None, "pd-050 dependencies are container-only")
+class DeclickGuardTests(unittest.TestCase):
+    """The de-click step is allowed to fail, but it must never hand back a take
+    it has silently emptied."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.dir = Path(self.temp.name)
+        self.infile = self.dir / "in.wav"
+        self.outfile = self.dir / "out.wav"
+        write_wav(self.infile, 4.0, amplitude=8000)
+
+    def run_with_output(self, seconds, returncode=0, write=True):
+        import subprocess as sp
+
+        def fake_run(command, **kwargs):
+            if write:
+                write_wav(self.outfile, seconds, amplitude=8000)
+            return sp.CompletedProcess(command, returncode, stdout="", stderr="boom")
+
+        with patch.object(voiceover.subprocess, "run", side_effect=fake_run):
+            return voiceover.remove_clicks(self.infile, self.outfile)
+
+    def test_a_normal_pause_trim_is_accepted(self):
+        self.assertTrue(self.run_with_output(3.5))
+
+    def test_a_header_only_wav_is_rejected(self):
+        # webrtcvad finding no speech writes a valid, non-empty, frameless wav.
+        self.assertFalse(self.run_with_output(0.0))
+        self.assertGreater(self.outfile.stat().st_size, 0)
+
+    def test_an_over_aggressive_trim_is_rejected(self):
+        with self.assertLogs(level="WARNING") as logs:
+            self.assertFalse(self.run_with_output(0.2))
+        self.assertIn("misread", "\n".join(logs.output))
+
+    def test_a_crashing_script_is_tolerated(self):
+        self.assertFalse(self.run_with_output(3.5, returncode=1))
+
+    def test_a_missing_output_is_tolerated(self):
+        self.assertFalse(self.run_with_output(0, write=False))
+
+    def test_the_callers_input_is_never_modified(self):
+        # sound_prep() rewrites its input in place, so remove_clicks copies first.
+        before = self.infile.read_bytes()
+        self.run_with_output(3.5)
+        self.assertEqual(self.infile.read_bytes(), before)
+
+
+@unittest.skipIf(voiceover is None, "pd-050 dependencies are container-only")
+class DeclickWithRealVadTests(unittest.TestCase):
+    """Exercises the real `webrtcvad` extension, which is a declared worker
+    dependency (`webrtcvad-wheels`). Skipped only on a partial local install."""
+
+    def setUp(self):
+        try:
+            import webrtcvad  # noqa: F401
+        except ImportError as exc:
+            self.skipTest(f"webrtcvad is not installed: {exc}")
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.dir = Path(self.temp.name)
+
+    def test_silence_is_rejected_rather_than_returned_as_an_empty_take(self):
+        infile, outfile = self.dir / "in.wav", self.dir / "out.wav"
+        write_wav(infile, 3.0, amplitude=0)
+        self.assertFalse(voiceover.remove_clicks(infile, outfile))
+
+
 @unittest.skipIf(voiceover is None, "pd-050 dependencies are container-only")
 class SynthesizeStageTests(unittest.TestCase):
     """End to end over `pd-050-voiceover.py --mode synthesize`, with the TTS call

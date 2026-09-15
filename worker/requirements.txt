@@ -2,6 +2,9 @@ numpy==2.2.2
 deepl==1.20.0
 openai==1.57.4
 pydub==0.25.1
+# Prebuilt wheels for the same extension module as `webrtcvad`, which ships
+# source-only and would need a compiler the slim image does not carry.
+webrtcvad-wheels==2.0.14
 python-dotenv==1.0.1
 requests==2.32.3
 tqdm==4.67.1

@@ -1178,10 +1178,28 @@ def retire_orphaned_segments(project_root, transcript):
     seg.save_index(project_root, index)
 
 
+# A de-click that keeps less than this fraction of the take has misread it as
+# non-speech rather than trimmed pauses from it.
+DECLICK_MIN_RETAINED_FRACTION = 0.25
+
+
+def wav_frame_count(path):
+    import wave
+
+    try:
+        with wave.open(str(path)) as handle:
+            return handle.getnframes()
+    except Exception:
+        return None
+
+
 def remove_clicks(infile, outfile):
-    """Legacy VAD de-click. `sound_prep()` rewrites its input in place, so it is
-    handed a scratch copy. It needs `webrtcvad`, which is not in the worker
-    image, so a failure here is logged and tolerated."""
+    """Legacy VAD de-click, returning True when its output is usable.
+
+    `sound_prep()` rewrites its input in place, so it is handed a scratch copy.
+    Failures are tolerated rather than fatal: the ffmpeg pause trim that follows
+    still runs, and a recording is worth keeping un-declicked.
+    """
     scratch = outfile.parent / "declick-input.wav"
     shutil.copyfile(infile, scratch)
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shared_clicks_removal.py")
@@ -1190,10 +1208,25 @@ def remove_clicks(infile, outfile):
         capture_output=True,
         text=True,
     )
-    if result.returncode != 0 or not outfile.exists() or outfile.stat().st_size == 0:
-        detail = " ".join((result.stderr or "").split())[:200]
-        logging.warning(f"Click removal unavailable, keeping the audio as-is: {detail}")
+    if result.returncode != 0 or not outfile.exists():
+        detail = " ".join((result.stderr or "").split())[:300]
+        logging.warning(f"Click removal failed, keeping the audio as-is: {detail}")
         return False
+
+    # An all-silence verdict writes a header-only wav, which is a non-zero file
+    # and would otherwise pass as a valid, silent segment.
+    before, after = wav_frame_count(infile), wav_frame_count(outfile)
+    if not after:
+        logging.warning("Click removal found no speech at all, keeping the audio as-is")
+        return False
+    if before and after < before * DECLICK_MIN_RETAINED_FRACTION:
+        logging.warning(
+            f"Click removal kept only {after / before:.0%} of the audio, "
+            "which looks like a misread rather than pause trimming; keeping the audio as-is"
+        )
+        return False
+    if before:
+        logging.info(f"Click removal kept {after / before:.0%} of the audio")
     return True
 
 

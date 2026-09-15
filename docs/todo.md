@@ -431,10 +431,17 @@ Still to confirm by hand, because they need a browser, a microphone, ffmpeg and 
   the source stem, which is the one the worker reads and writes. It previously preferred
   `work/source.improved.json`, so the editor and the pipeline could end up on two copies. They
   were identical in the projects on disk, so this is a removed risk rather than an observed bug.
-- **Click removal stays best effort.** The legacy cleanup shells out to `shared_clicks_removal.py`,
-  which imports `webrtcvad`. That package is not in `worker/requirements.txt` and needs a compiler
-  the slim image does not have, so ingest logs a warning and keeps the un-declicked audio. The
-  ffmpeg pause trim and loudness normalization still run.
+- **Click removal now actually runs.** The legacy cleanup shells out to
+  `shared_clicks_removal.py`, which imports `webrtcvad`. Upstream `webrtcvad` ships source-only
+  and would need a compiler the slim image does not carry, so the worker depends on
+  `webrtcvad-wheels==2.0.14`, which publishes the same extension module as prebuilt wheels for
+  linux x86_64, linux aarch64 and macOS arm64. Verified by building `python:3.12-slim` and
+  importing it, and by running the script over a real 12 s voice sample (12.0 s to 10.8 s, pauses
+  trimmed, speech intact).
+- **The de-click step stays non-fatal, and now checks its own output.** A crash, an empty result,
+  or a result under 25% of the input duration is logged and the un-declicked audio is kept. The
+  earlier guard only rejected a zero-byte file, but an all-silence verdict writes a valid
+  header-only wav, which would have passed as a silent segment and put a hole in the mix.
 - **A single-chunk regeneration occupies the whole project.** The worker runs one project at a
   time, so the project shows as busy for the duration and the editor disables its controls. Fine
   for a local single-user tool; it would need a real job queue to be anything else.
