@@ -38,7 +38,14 @@ DOWNLOADABLE_WORK_FILES = {
 # `tts` and `voiceover-build` are the two halves of `voiceover`, for reruns that
 # should not redo the other half.
 STAGE_OPTIONS = {"transcribe", "translate", "customize", "improve", "voiceover", "tts", "voiceover-build"}
-BUSY_STATES = {"queued", "running"}
+# `cancelling` still counts as busy: the worker is tearing the run down and a
+# second job queued now would race it.
+BUSY_STATES = {"queued", "running", "cancelling"}
+LIVE_RUN_STATES = {"running", "cancelling"}
+# A live run heartbeats every ~10s. Past this, treat it as orphaned rather than
+# refusing new work on the project forever.
+RUN_STALE_AFTER_SECONDS = float(os.getenv("RUN_STALE_AFTER_SECONDS", "90"))
+CANCEL_REQUEST_NAME = "cancel.request"
 SEGMENT_UPLOAD_MAX_BYTES = int(os.getenv("SEGMENT_UPLOAD_MAX_BYTES", str(25 * 1024 * 1024)))
 SEGMENT_MEDIA_TYPES = {
     "ogg": "audio/ogg",
@@ -118,14 +125,23 @@ def safe_name(name: str) -> str:
 def read_json(path: Path, default: Any) -> Any:
     if not path.exists():
         return default
-    with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (json.JSONDecodeError, OSError):
+        # The worker rewrites status.json while the portal polls it; a single
+        # torn read should not turn into a 500.
+        return default
 
 
 def write_json(path: Path, data: Any) -> None:
+    """Atomic, so the worker never reads a half-written file the portal is
+    still writing."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
+    temp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    with temp_path.open("w", encoding="utf-8") as handle:
         json.dump(data, handle, indent=2, ensure_ascii=False)
+    os.replace(temp_path, path)
 
 
 def project_path(project_id: str) -> Path:
@@ -146,6 +162,8 @@ def project_summary(path: Path) -> dict[str, Any]:
         "metadata": metadata,
         "status": status,
         "manifest": manifest,
+        "busy": project_is_busy(status),
+        "stale": run_is_stale(status),
     }
 
 
@@ -1035,6 +1053,7 @@ def start_draft_project(
     write_json(root / "config" / "params.json", params)
     write_json(source_path.with_suffix(".params.json"), params)
     write_json(root / "metadata.json", metadata)
+    clear_cancel_request(root)
     write_json(root / "status.json", {
         "project_id": project_id,
         "state": "queued",
@@ -1143,14 +1162,60 @@ def project_text_keys(params: dict[str, Any]) -> tuple[str, str]:
     )
 
 
+def parse_iso(value: Any) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def run_liveness_age(status: dict[str, Any]) -> float | None:
+    """Seconds since this run last showed a sign of life.
+
+    Both timestamps matter: `heartbeat` is refreshed by the worker during a long
+    stage, and `updated_at` moves on every stage transition. Taking the newer of
+    the two means neither a quiet stage nor a status rewrite looks like death.
+    """
+    stamps = [parse_iso(status.get(key)) for key in ("heartbeat", "updated_at")]
+    stamps = [stamp for stamp in stamps if stamp is not None]
+    if not stamps:
+        return None
+    return (datetime.now(timezone.utc) - max(stamps)).total_seconds()
+
+
+def run_is_stale(status: dict[str, Any]) -> bool:
+    """True when a run claims to be live but nothing is driving it any more."""
+    if status.get("state") not in LIVE_RUN_STATES:
+        return False
+    age = run_liveness_age(status)
+    return age is None or age > RUN_STALE_AFTER_SECONDS
+
+
+def project_is_busy(status: dict[str, Any]) -> bool:
+    return status.get("state") in BUSY_STATES and not run_is_stale(status)
+
+
+def cancel_request_path(root: Path) -> Path:
+    return root / CANCEL_REQUEST_NAME
+
+
+def clear_cancel_request(root: Path) -> None:
+    """A stop left over from a previous run would kill the next one on sight."""
+    cancel_request_path(root).unlink(missing_ok=True)
+
+
 def ensure_project_idle(root: Path) -> None:
     """One worker runs one project at a time, so a second job would either be
     dropped or race the first. Say so instead of pretending it was accepted."""
     status = read_json(root / "status.json", {})
-    state = status.get("state")
-    if state in BUSY_STATES:
+    if project_is_busy(status):
+        state = status.get("state")
         stage = status.get("stage") or "unknown"
-        raise HTTPException(status_code=409, detail=f"Project is {state} ({stage}). Wait for it to finish.")
+        raise HTTPException(
+            status_code=409,
+            detail=f"Project is {state} ({stage}). Stop it first or wait for it to finish.",
+        )
 
 
 def write_improved_transcript(root: Path, path: Path, chunks: list[dict[str, Any]]) -> None:
@@ -1208,6 +1273,7 @@ def queue_voiceover_job(
     if improved_path != canonical_improved:
         canonical_improved.write_text(improved_path.read_text(encoding="utf-8"), encoding="utf-8")
 
+    clear_cancel_request(root)
     params = read_json(root / "config" / "params.json", {})
     params["stage_preset"] = "voiceover"
     params["stages_to_run"] = stages
@@ -1275,6 +1341,55 @@ def build_voiceover(project_id: str) -> dict[str, Any]:
     )
 
 
+@app.post("/api/projects/{project_id}/cancel")
+def cancel_project(project_id: str) -> dict[str, Any]:
+    """Stop a run, whether or not anything is still driving it.
+
+    This container cannot signal the worker's processes, so a live run is asked
+    to stop through a file the worker polls. Queued work and orphaned runs have
+    no process behind them, so those are resolved here and now.
+    """
+    root = project_path(project_id)
+    status = read_json(root / "status.json", {})
+    state = status.get("state")
+    if state not in BUSY_STATES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Project is {state or 'idle'}, so there is nothing to stop.",
+        )
+
+    if state == "queued" or run_is_stale(status):
+        clear_cancel_request(root)
+        message = (
+            "Stopped before processing started"
+            if state == "queued"
+            else "The run had already stopped; state reset"
+        )
+        status.update(
+            {
+                "state": "cancelled",
+                "stage": "cancelled",
+                "message": message,
+                "updated_at": now_iso(),
+            }
+        )
+        status.pop("heartbeat", None)
+        status.pop("worker_boot_id", None)
+        write_json(root / "status.json", status)
+        return project_summary(root)
+
+    cancel_request_path(root).write_text(now_iso(), encoding="utf-8")
+    status.update(
+        {
+            "state": "cancelling",
+            "message": "Stop requested, waiting for the worker to shut the run down",
+            "updated_at": now_iso(),
+        }
+    )
+    write_json(root / "status.json", status)
+    return project_summary(root)
+
+
 @app.get("/api/projects/{project_id}/segments")
 def list_segments(project_id: str) -> dict[str, Any]:
     """Every chunk's audio state in one call. The editor renders one row per
@@ -1287,7 +1402,8 @@ def list_segments(project_id: str) -> dict[str, Any]:
     return {
         "project_id": project_id,
         "filename": path.name,
-        "busy": status.get("state") in BUSY_STATES,
+        "busy": project_is_busy(status),
+        "stale": run_is_stale(status),
         "job_kind": status.get("job_kind"),
         "segments": seg.describe_chunks(
             root, chunks, params, improved_key=improved_key, translation_key=translation_key

@@ -433,8 +433,21 @@ class SegmentEndpointTests(unittest.TestCase):
     def read_transcript(self) -> list[dict]:
         return json.loads(self.improved.read_text(encoding="utf-8"))
 
-    def set_state(self, state: str) -> None:
-        api.write_json(self.root / "status.json", {"project_id": self.project_id, "state": state})
+    def set_state(self, state: str, age_seconds: float = 0.0) -> None:
+        """A live run heartbeats; `age_seconds` ages it into an orphan."""
+        from datetime import datetime, timedelta, timezone
+
+        stamp = (datetime.now(timezone.utc) - timedelta(seconds=age_seconds)).isoformat()
+        api.write_json(
+            self.root / "status.json",
+            {
+                "project_id": self.project_id,
+                "state": state,
+                "stage": state,
+                "updated_at": stamp,
+                "heartbeat": stamp,
+            },
+        )
 
     def upload(self, chunk_id: str, filename: str = "c000.webm", payload: bytes = b"recorded-audio"):
         import io
@@ -608,6 +621,81 @@ class SegmentEndpointTests(unittest.TestCase):
         self.set_state("running")
         payload = api.list_segments(self.project_id)
         self.assertTrue(payload["busy"])
+
+    # ---------------------------------------------------------------- stopping
+
+    def test_stop_asks_the_worker_to_shut_a_live_run_down(self) -> None:
+        self.set_state("running")
+        project = api.cancel_project(self.project_id)
+
+        # The API cannot signal the worker's processes, so it leaves a request.
+        self.assertEqual(project["status"]["state"], "cancelling")
+        self.assertTrue((self.root / "cancel.request").exists())
+        # Still busy: the run is being torn down and must not be raced.
+        self.assertTrue(project["busy"])
+        with self.assertRaises(api.HTTPException) as caught:
+            api.start_voiceover(self.project_id)
+        self.assertEqual(caught.exception.status_code, 409)
+
+    def test_stop_resolves_queued_work_immediately(self) -> None:
+        self.set_state("queued")
+        project = api.cancel_project(self.project_id)
+
+        # Nothing has started, so there is no process to wait for.
+        self.assertEqual(project["status"]["state"], "cancelled")
+        self.assertFalse((self.root / "cancel.request").exists())
+        self.assertFalse(project["busy"])
+
+    def test_stop_resets_a_run_that_already_died(self) -> None:
+        # Exactly the case a worker restart leaves behind.
+        self.set_state("running", age_seconds=api.RUN_STALE_AFTER_SECONDS + 30)
+        project = api.cancel_project(self.project_id)
+
+        self.assertEqual(project["status"]["state"], "cancelled")
+        self.assertIn("already stopped", project["status"]["message"])
+        self.assertFalse((self.root / "cancel.request").exists())
+        self.assertNotIn("heartbeat", project["status"])
+
+    def test_an_orphaned_run_stops_blocking_new_work_on_its_own(self) -> None:
+        """The stuck-forever bug: no button press should be needed to recover."""
+        self.set_state("running", age_seconds=api.RUN_STALE_AFTER_SECONDS + 30)
+        status = api.read_json(self.root / "status.json", {})
+        self.assertTrue(api.run_is_stale(status))
+        self.assertFalse(api.project_is_busy(status))
+        # No 409, because nothing is actually driving that run.
+        self.assertEqual(api.start_voiceover(self.project_id)["status"]["state"], "queued")
+
+    def test_a_long_quiet_stage_is_not_mistaken_for_a_dead_run(self) -> None:
+        # Voiceover can run for hours between stage transitions; the heartbeat
+        # is what keeps it from looking orphaned.
+        from datetime import datetime, timedelta, timezone
+
+        old = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+        api.write_json(
+            self.root / "status.json",
+            {
+                "project_id": self.project_id,
+                "state": "running",
+                "stage": "voiceover",
+                "updated_at": old,
+                "heartbeat": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        status = api.read_json(self.root / "status.json", {})
+        self.assertFalse(api.run_is_stale(status))
+        self.assertTrue(api.project_is_busy(status))
+
+    def test_stop_is_rejected_when_there_is_nothing_to_stop(self) -> None:
+        for state in ("completed", "failed", "cancelled", "draft"):
+            self.set_state(state)
+            with self.assertRaisesRegex(api.HTTPException, "nothing to stop"):
+                api.cancel_project(self.project_id)
+
+    def test_queueing_discards_a_stop_left_over_from_a_previous_run(self) -> None:
+        (self.root / "cancel.request").write_text("stale", encoding="utf-8")
+        api.start_voiceover(self.project_id)
+        # Otherwise the worker would kill the new run the moment it started.
+        self.assertFalse((self.root / "cancel.request").exists())
 
     # ---------------------------------------------------------------- round-trip
 

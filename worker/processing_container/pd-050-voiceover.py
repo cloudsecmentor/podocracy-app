@@ -1127,14 +1127,24 @@ def chunk_id_for_segment_key(transcript, segment_key):
     raise ValueError(f"Segment '{segment_key}' not found in improved transcript")
 
 
-def sync_audio_blocks(project_root, transcript, all_params, path_improved):
+def project_voice_hash(project_params):
+    """Hash only the project's own params, never the image defaults.
+
+    The portal API computes the current hash from `config/params.json` and has
+    no access to the worker's `parameters.json`. Folding defaults in here gives
+    the two different answers for the same chunk, so the editor would report
+    everything as stale while the worker correctly treated it as current.
+    """
+    return seg.voice_hash(project_params)
+
+
+def sync_audio_blocks(project_root, transcript, all_params, path_improved, current_voice_hash):
     """Mirror the store onto the transcript so every chunk carries its own audio.
 
     `segments.json` stays authoritative: the transcript is user-editable, so a
     hand-edit must never be able to strand a file.
     """
     index = seg.load_index(project_root)
-    current_voice_hash = seg.voice_hash(all_params)
     improved_key, translation_key = text_keys(all_params)
     for chunk in transcript:
         chunk_id = chunk.get("chunk_id")
@@ -1402,7 +1412,9 @@ def import_recordings_zip(project_root, transcript, all_params):
         shutil.rmtree(extract_dir, ignore_errors=True)
 
 
-def import_existing_audio_dir(project_root, transcript, existing_dir, all_params, source=seg.SOURCE_TTS):
+def import_existing_audio_dir(
+    project_root, transcript, existing_dir, all_params, current_voice_hash, source=seg.SOURCE_TTS
+):
     """Adopt a pre-store directory of `<start>-<end>.ogg` clips into the store.
 
     Covers the deprecated `--dir` flag and the Azure custom-recording download,
@@ -1420,7 +1432,6 @@ def import_existing_audio_dir(project_root, transcript, existing_dir, all_params
     store = seg.store_dir(project_root)
     store.mkdir(parents=True, exist_ok=True)
     improved_key, translation_key = text_keys(all_params)
-    current_voice_hash = seg.voice_hash(all_params)
     matched = match_files_to_chunks(files, transcript)
     for chunk in transcript:
         chunk_id = chunk.get("chunk_id")
@@ -1465,7 +1476,9 @@ def failed_segment_entry(store, previous, tts_api, exc):
     return entry
 
 
-def synthesize_missing_segments(path, project_root, transcript, all_params, forced_ids=None):
+def synthesize_missing_segments(
+    path, project_root, transcript, all_params, current_voice_hash, forced_ids=None
+):
     """Generate audio for chunks that need it, one chunk at a time.
 
     Without `forced_ids` this is a gap filler: it skips anything already current
@@ -1478,7 +1491,6 @@ def synthesize_missing_segments(path, project_root, transcript, all_params, forc
     voice = get_voice_name(path)
     tts_api = str(all_params.get("tts_api") or "openai").lower()
     model = all_params.get("vibevoice_model") if tts_api == "vibevoice" else all_params.get("openai_model_tts")
-    current_voice_hash = seg.voice_hash(all_params)
     sleep_time = 0.0 if tts_api == "vibevoice" else float(all_params.get("sleep_time_tts") or 0)
 
     store = seg.store_dir(project_root)
@@ -1564,18 +1576,47 @@ def synthesize_missing_segments(path, project_root, transcript, all_params, forc
         raise RuntimeError(f"TTS failed for {len(failures)} chunk(s): {', '.join(failures[:8])}")
 
 
-def stage_segments_for_build(project_root, transcript, all_params):
+# A hair of silence so two merged lines do not sound spliced together.
+MERGED_CHUNK_GAP_MS = 150
+# Named explicitly because the default encoder for the ogg container varies by
+# ffmpeg build: the worker image picks libvorbis, but a Homebrew build with no
+# libvorbis silently writes flac instead.
+CANONICAL_AUDIO_CODEC = "libvorbis"
+
+
+def concat_audio(paths, destination):
+    """Join clips that share one timing slot into a single staged file.
+
+    Timing keys have one-second resolution, so a fast exchange between speakers
+    can put two chunks in the same second. The legacy assembler globs by
+    filename, so writing both to one name silently dropped the first; joining
+    them keeps both lines in the right place.
+    """
+    from pydub import AudioSegment
+
+    combined = AudioSegment.empty()
+    for index, path in enumerate(paths):
+        if index:
+            combined += AudioSegment.silent(duration=MERGED_CHUNK_GAP_MS)
+        combined += AudioSegment.from_file(path)
+    combined.export(str(destination), format=seg.CANONICAL_EXTENSION, codec=CANONICAL_AUDIO_CODEC)
+
+
+def stage_segments_for_build(project_root, transcript, all_params, current_voice_hash):
     """Copy the store into a scratch directory under the timing-based filenames
     the legacy assembler globs for. Retiming a chunk is then just a rename."""
     index = seg.load_index(project_root)
-    current_voice_hash = seg.voice_hash(all_params)
     improved_key, translation_key = text_keys(all_params)
     tts_tempo = resolve_tempo(all_params, "voiceover_tempo", get_params("speedup_value"))
     recording_tempo = resolve_tempo(all_params, "recording_tempo", 1.0)
 
     staging = Path(create_timestamped_directory(str(seg.store_dir(project_root) / ".staging")))
     tempo_by_filename = {}
+    # basename -> [(chunk_id, audio path, is_recording)], because more than one
+    # chunk can land in the same timing slot.
     claimed = {}
+    order = []
+    merged = []
     skipped = []
     stale = []
 
@@ -1601,17 +1642,29 @@ def stage_segments_for_build(project_root, transcript, all_params):
             # should not have to diff the result to find out it happened.
             stale.append(chunk_id)
         basename = seg.staging_basename(chunk)
-        if basename in claimed:
-            raise ValueError(
-                f"Chunks [{claimed[basename]}] and [{chunk_id}] both map to timing '{basename}'. "
-                "Assembly is keyed on timings, so give them distinct start/end values."
-            )
-        claimed[basename] = chunk_id
-        destination = staging / f"{basename}.{seg.CANONICAL_EXTENSION}"
-        shutil.copyfile(resolved, destination)
         is_recording = (entry or {}).get("source") == seg.SOURCE_RECORDING
-        tempo_by_filename[destination.name] = recording_tempo if is_recording else tts_tempo
+        if basename not in claimed:
+            claimed[basename] = []
+            order.append(basename)
+        claimed[basename].append((chunk_id, resolved, is_recording))
 
+    for basename in order:
+        members = claimed[basename]
+        destination = staging / f"{basename}.{seg.CANONICAL_EXTENSION}"
+        if len(members) == 1:
+            shutil.copyfile(members[0][1], destination)
+        else:
+            merged.append(f"{basename} <- {', '.join(member[0] for member in members)}")
+            concat_audio([member[1] for member in members], destination)
+        # A merged clip holding any recording keeps tempo 1.0: speeding up the
+        # user's own voice to match generated speech is the worse trade.
+        any_recording = any(member[2] for member in members)
+        tempo_by_filename[destination.name] = recording_tempo if any_recording else tts_tempo
+
+    if merged:
+        logging.info(
+            f"Merged {len(merged)} timing slot(s) shared by more than one chunk: {'; '.join(merged[:8])}"
+        )
     if skipped:
         logging.warning(
             f"Assembling without {len(skipped)} chunk(s) that have no usable audio: {', '.join(skipped[:8])}"
@@ -1623,12 +1676,17 @@ def stage_segments_for_build(project_root, transcript, all_params):
         )
     if not claimed:
         raise ValueError("No chunk audio available to assemble. Generate or record segments first.")
-    logging.info(f"Staged {len(claimed)} segment(s) for assembly in [{staging}]")
+    staged_chunks = sum(len(members) for members in claimed.values())
+    logging.info(
+        f"Staged {staged_chunks} chunk(s) as {len(claimed)} clip(s) for assembly in [{staging}]"
+    )
     return staging, tempo_by_filename
 
 
-def build_voiceover(path_mp3, project_root, transcript, all_params):
-    staging, tempo_by_filename = stage_segments_for_build(project_root, transcript, all_params)
+def build_voiceover(path_mp3, project_root, transcript, all_params, current_voice_hash):
+    staging, tempo_by_filename = stage_segments_for_build(
+        project_root, transcript, all_params, current_voice_hash
+    )
     try:
         temp_dir_combine = update_tts_audio(path_mp3, str(staging), tempo_by_filename=tempo_by_filename)
         shift_seconds = None
@@ -1670,6 +1728,7 @@ def main(path, existing_dir=None, redo_segment=None, mode="all", chunk_ids=None)
     project_params = read_project_params(path)
     all_params = get_all_params(path=path)
     project_root = resolve_project_root(path, path_improved)
+    current_voice_hash = project_voice_hash(project_params)
     seg.store_dir(project_root).mkdir(parents=True, exist_ok=True)
     logging.info(f"Voiceover mode [{mode}], segment store [{seg.store_dir(project_root)}]")
 
@@ -1682,7 +1741,9 @@ def main(path, existing_dir=None, redo_segment=None, mode="all", chunk_ids=None)
 
     if existing_dir:
         logging.warning("--dir is deprecated; importing its contents into the segment store instead")
-        import_existing_audio_dir(project_root, transcript, existing_dir, all_params)
+        import_existing_audio_dir(
+            project_root, transcript, existing_dir, all_params, current_voice_hash
+        )
 
     # Azure deployments still deliver recordings as a storage-account download.
     if parse_legacy_bool(project_params.get("custom_recording", False)) and file_from_sta(path):
@@ -1691,7 +1752,8 @@ def main(path, existing_dir=None, redo_segment=None, mode="all", chunk_ids=None)
         )
         if legacy_dir:
             import_existing_audio_dir(
-                project_root, transcript, legacy_dir, all_params, source=seg.SOURCE_RECORDING
+                project_root, transcript, legacy_dir, all_params, current_voice_hash,
+                source=seg.SOURCE_RECORDING,
             )
 
     import_recordings_zip(project_root, transcript, all_params)
@@ -1704,16 +1766,19 @@ def main(path, existing_dir=None, redo_segment=None, mode="all", chunk_ids=None)
 
     if mode in ("synthesize", "all"):
         try:
-            synthesize_missing_segments(path, project_root, transcript, all_params, forced_ids=forced or None)
+            synthesize_missing_segments(
+                path, project_root, transcript, all_params, current_voice_hash,
+                forced_ids=forced or None,
+            )
         finally:
             # Even a failed run should leave the transcript describing what exists.
-            sync_audio_blocks(project_root, transcript, all_params, path_improved)
+            sync_audio_blocks(project_root, transcript, all_params, path_improved, current_voice_hash)
         clear_voiceover_chunks(path, project_root)
     else:
-        sync_audio_blocks(project_root, transcript, all_params, path_improved)
+        sync_audio_blocks(project_root, transcript, all_params, path_improved, current_voice_hash)
 
     if mode in ("build", "all"):
-        build_voiceover(path_mp3, project_root, transcript, all_params)
+        build_voiceover(path_mp3, project_root, transcript, all_params, current_voice_hash)
 
 
 if __name__ == "__main__":

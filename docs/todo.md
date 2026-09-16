@@ -319,9 +319,11 @@ is expressed through `config/params.json` plus `status.json`:
   This matches today's `Empty text in chunk` log branch.
 - **Chunk with no `end`.** Staged as `<start>.ogg`; `get_segment_end_seconds` already derives the end
   from the following filename.
-- **Two chunks with identical `start`/`end`.** The staging filename would collide. The build fails
-  fast with both `chunk_id`s named, rather than silently dropping one, because today's positional
-  glob would drop one without notice.
+- **Two chunks with identical `start`/`end`.** Timing keys have one-second resolution, so a fast
+  exchange between speakers genuinely produces this. Both clips are staged as one file with their
+  audio joined in transcript order, separated by `MERGED_CHUNK_GAP_MS` (150 ms). The legacy
+  behaviour wrote both to the same filename, so the first was silently dropped from the mix. If any
+  member of a merged slot is a recording, the whole clip keeps tempo 1.0.
 - **Improved JSON replaced wholesale** (user pastes new content, or re-runs `improve`). `chunk_id`s
   are gone, so ids are reassigned from `c000` by position and collide with the entries already in
   the store. `text_hash` is what makes that safe: a reassigned id whose text does not match its old
@@ -376,7 +378,8 @@ Verified by the automated suites (`worker/test_segment_store.py`, `apps/app-api/
       `dltrans`.
 - [x] Deleting a chunk retires its audio to `orphaned/` and does not break the build.
 - [x] A chunk whose improved text is blank produces no audio and is not a hole in the build.
-- [x] Two chunks with identical timings fail the build loudly instead of one being dropped.
+- [x] Two chunks with identical timings are merged into one clip rather than one being dropped,
+      including a three-way collision and a slot mixing generated audio with a recording.
 - [x] Every mutating endpoint returns `409` while a job is running; listing still works.
 
 Still to confirm by hand, because they need a browser, a microphone, ffmpeg and a real model:
@@ -445,8 +448,93 @@ Still to confirm by hand, because they need a browser, a microphone, ffmpeg and 
 - **A single-chunk regeneration occupies the whole project.** The worker runs one project at a
   time, so the project shows as busy for the duration and the editor disables its controls. Fine
   for a local single-user tool; it would need a real job queue to be anything else.
+- **Colliding timings are merged, not rejected.** The first cut failed the build when two chunks
+  shared a timing key, on the theory that it was a data error worth surfacing. It is not rare: four
+  of seven projects on disk have collisions, because `mmss` keys cannot separate two lines spoken in
+  the same second. Worse, the three older projects had already *completed* under the legacy code,
+  each silently dropping three chunks of narration. Staging now joins the colliding clips.
+- **The ogg encoder is named explicitly.** `concat_audio` passes `libvorbis` rather than letting
+  ffmpeg pick the container default, because that default is build-dependent: the worker image
+  chooses libvorbis, but an ffmpeg built without it writes flac into a `.ogg` file instead. The
+  legacy `update_tts_audio` re-encode still relies on the default and would have the same problem on
+  such a build.
 - **Legacy flags are deprecated, not removed.** `--redo-segment` maps onto `--chunks`, and `--dir`
   now imports its contents into the store instead of being assembled directly. Both log a warning.
+
+## Stopping a run
+
+Status: implemented.
+
+### Problem
+
+A run could only be stopped by restarting the worker container, and doing that left
+`status.json` frozen at `running`. Because the portal refuses new work on a busy project, a
+restart mid-run made that project permanently unusable until someone hand-edited its status.
+
+### Why a button could not just kill the process
+
+The portal API and the worker are separate containers, so the API has no signal path to the
+worker's processes. The only shared channel is the projects volume. The pipeline is also three
+levels deep, `worker_poll` to `pd-00-orchestrator` to `pd-050-voiceover` to `ffmpeg`, so
+signalling the direct child would leave grandchildren running and still writing to the project.
+
+### Design
+
+- **Stop is a file.** `POST /api/projects/{id}/cancel` writes `<project>/cancel.request` and sets
+  `state: cancelling`. `worker_poll` spawns the pipeline with `start_new_session=True` and waits in
+  a one-second loop instead of blocking, so it can see the request. On seeing it, it sends SIGTERM
+  to the *process group* and escalates to SIGKILL after `WORKER_CANCEL_GRACE_SECONDS` (10).
+- **Liveness.** While a run is live the worker writes `heartbeat` and `worker_boot_id` into
+  `status.json` every `WORKER_HEARTBEAT_SECONDS` (10). The API treats `running`/`cancelling` as
+  orphaned once the newer of `heartbeat` and `updated_at` is older than `RUN_STALE_AFTER_SECONDS`
+  (90), and stops reporting it busy. Both timestamps matter: `heartbeat` covers a stage that runs
+  for hours without reporting, `updated_at` covers a stage transition that rewrites the file.
+- **Startup sweep.** On boot the worker resets any project still marked `running`/`cancelling` to
+  `interrupted`, skipping any whose lock is genuinely held. A run cannot outlive the worker that
+  spawned it, so this fixes the restart case deterministically rather than waiting out a timeout.
+- **One button, two behaviours.** A live run gets a cooperative cancel; queued work and already-dead
+  runs are resolved by the API on the spot, since neither has a process behind it. The user presses
+  the same control either way.
+- **States.** `cancelling` counts as busy so a second job cannot race the teardown. `cancelled` and
+  `interrupted` are terminal and not busy. `queued` is never treated as stale, because nothing has
+  started yet.
+- **Stopping is cheap.** The segment store writes its index after every chunk, so a voiceover
+  stopped 100 chunks in keeps those 100 and resuming only generates the rest. Cancel never touches
+  the store.
+
+### Two bugs this surfaced, both pre-existing
+
+- **`status.json` was written non-atomically.** `write_json` truncated in place, so a concurrent
+  reader could catch it empty and `read_json` raised. Three processes write that file (worker,
+  pipeline, portal). Adding a heartbeat and a one-second cancel poll made the race fire within
+  seconds: the worker died mid-cancel, Docker restarted it, and the project was left at `failed`
+  with a stale `cancel.request`. This is almost certainly the original cause of the mystery worker
+  restart that motivated this work. All three `write_json` implementations now write to a temp file
+  and `os.replace`, and all three `read_json` implementations fall back instead of raising.
+- **One failing project took the whole worker down.** `main()` re-raised after marking a project
+  failed, so the process exited and the restart policy brought it back with every other project's
+  status frozen mid-run. It now logs the traceback, marks that project failed, clears its stop
+  request, and keeps polling.
+
+### Verified
+
+Automated: 17 tests in `worker/test_worker_cancel.py`, including a real three-level process tree
+whose grandchild must die, a run that traps SIGTERM and needs SIGKILL, the sweep skipping a locked
+project, and a 300-iteration concurrent reader that must never see a partial `status.json`. Plus 7
+endpoint tests in `apps/app-api/test_api.py` covering the live, queued and orphaned paths, the 409
+while `cancelling`, and a leftover stop request being discarded on queue.
+
+End to end against the running containers: a scoped chunk regeneration was stopped mid-synthesis
+with the tree three deep. Result: state `cancelled`, tree collapsed to `worker_poll` alone, the
+worker process unchanged (no container restart), the existing chunk audio byte-identical because
+synthesis writes aside and moves into place only on success, no leftover partial files, and
+`cancel.request` cleared. Cancelling queued work with the worker stopped resolved immediately.
+
+### Not done
+
+- `pd-050` does not check the stop request between chunks, so a stop discards the chunk in flight
+  rather than finishing it. The per-chunk index writes make this safe, just not maximally tidy.
+- There is no stop for work the legacy Azure deployment runs; this is portal-only.
 
 ## Legacy Worker Parity
 

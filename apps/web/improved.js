@@ -22,6 +22,7 @@ const segments = {
   byId: new Map(),
   available: false,
   busy: false,
+  stale: false,
   jobKind: null,
   recordingId: null,
   playingId: null,
@@ -210,6 +211,7 @@ async function loadSegments() {
     segments.byId = new Map((payload.segments || []).map((item) => [item.chunk_id, item]));
     segments.available = true;
     segments.busy = Boolean(payload.busy);
+    segments.stale = Boolean(payload.stale);
     segments.jobKind = payload.job_kind || null;
   } catch {
     // A transcript the editor can only show as raw JSON has no per-chunk audio.
@@ -430,6 +432,26 @@ async function queueVoiceover(endpoint, successMessage) {
   }
 }
 
+async function stopProcessing() {
+  if (!projectId) return;
+  setError("");
+  setMessage("");
+  try {
+    const result = await api(`/api/projects/${projectId}/cancel`, { method: "POST" });
+    setMessage(
+      result.status?.state === "cancelling"
+        ? "Stopping. Chunks already generated are kept."
+        : "Stopped.",
+    );
+    await loadSegments();
+    scheduleStatusPoll();
+  } catch (error) {
+    setError(error.message);
+  } finally {
+    render();
+  }
+}
+
 function scheduleStatusPoll() {
   if (pollTimer) return;
   pollTimer = setInterval(async () => {
@@ -509,6 +531,9 @@ function workspaceHtml() {
       ${segments.available ? `
         <button type="button" id="generate-missing" class="secondary" ${state.isSaving || segments.busy ? "disabled" : ""}>Generate missing</button>
         <button type="button" id="build-voiceover" class="secondary" ${state.isSaving || segments.busy ? "disabled" : ""}>Build voiceover</button>
+      ` : ""}
+      ${segments.busy || segments.stale ? `
+        <button type="button" id="stop-processing" class="secondary danger">${segments.stale ? "Reset stuck state" : "Stop processing"}</button>
       ` : ""}
       <a class="secondary" href="/">Back</a>
       <span class="badge">${chunkCount}</span>
@@ -605,6 +630,13 @@ function bindWorkspace() {
   if (startVoiceoverButton) {
     startVoiceoverButton.addEventListener("click", () => {
       void startVoiceover();
+    });
+  }
+
+  const stopButton = document.querySelector("#stop-processing");
+  if (stopButton) {
+    stopButton.addEventListener("click", () => {
+      void stopProcessing();
     });
   }
 

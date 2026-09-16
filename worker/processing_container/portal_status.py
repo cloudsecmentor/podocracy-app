@@ -37,14 +37,22 @@ def portal_project_dir(source_path: str) -> Path | None:
 def read_json(path: Path, default):
     if not path.exists():
         return default
-    with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (json.JSONDecodeError, OSError):
+        # A stage report is not worth failing a run over.
+        return default
 
 
 def write_json(path: Path, data) -> None:
+    """Atomic: the worker heartbeats into status.json while stages report into
+    it, and a truncate-in-place rewrite is visible to readers as an empty file."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
+    temp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    with temp_path.open("w", encoding="utf-8") as handle:
         json.dump(data, handle, indent=2, ensure_ascii=False)
+    os.replace(temp_path, path)
 
 
 def update_portal_status(
@@ -74,6 +82,11 @@ def update_portal_status(
     # Set by the portal when the job was queued; the run must not erase it.
     if previous.get("job_kind"):
         status["job_kind"] = previous["job_kind"]
+    # Written by worker_poll so the portal can tell a live run from an orphaned
+    # one. A stage transition is not evidence the worker died.
+    for key in ("heartbeat", "worker_boot_id"):
+        if previous.get(key):
+            status[key] = previous[key]
     if error:
         status["error"] = error
     write_json(project_dir / "status.json", status)

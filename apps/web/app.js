@@ -232,6 +232,7 @@ async function api(path, options = {}) {
 function statusClass(state) {
   if (state === "completed") return "status completed";
   if (state === "failed") return "status failed";
+  if (state === "cancelled" || state === "interrupted") return "status stopped";
   return "status";
 }
 
@@ -457,6 +458,7 @@ function detailSignature(project, hasImproved, improvedFilename, stages, artifac
   return [
     project.id,
     project.status?.state || "",
+    project.busy ? "busy" : project.stale ? "stale" : "idle",
     hasImproved ? "1" : "0",
     improvedFilename || "",
     stages.map((item) => item.name).join(","),
@@ -537,6 +539,14 @@ async function renderDetail(project) {
       ${status.state === "draft" ? `
         <div class="editor-actions">
           <button type="button" id="configure-draft">Configure and start</button>
+        </div>
+      ` : ""}
+      ${project.busy || project.stale ? `
+        <div class="editor-actions">
+          <button type="button" id="stop-processing" class="secondary danger">${project.stale ? "Reset stuck state" : "Stop processing"}</button>
+          <span class="muted">${project.stale
+            ? "Nothing is driving this run any more."
+            : "Chunks already generated are kept, so you can resume later."}</span>
         </div>
       ` : ""}
       <div class="stage-summary">
@@ -622,6 +632,12 @@ async function renderDetail(project) {
         instructionsDirty = true;
         instructionsEditor.focus();
         setActionMessage("Copied. Review the text, then press Save.", "ok");
+      });
+    }
+    const stopButton = detailEl.querySelector("#stop-processing");
+    if (stopButton) {
+      stopButton.addEventListener("click", () => {
+        void stopProcessing(project.id);
       });
     }
     const configureDraftButton = detailEl.querySelector("#configure-draft");
@@ -714,6 +730,22 @@ async function startVoiceoverFromImproved(projectId) {
     await api(`/api/projects/${projectId}/voiceover`, { method: "POST" });
     selectedProject = projectId;
     setActionMessage("Voiceover queued.", "ok");
+    await loadProjects();
+  } catch (error) {
+    setActionMessage(error.message, "error");
+  }
+}
+
+async function stopProcessing(projectId) {
+  try {
+    const result = await api(`/api/projects/${projectId}/cancel`, { method: "POST" });
+    selectedProject = projectId;
+    setActionMessage(
+      result.status?.state === "cancelling"
+        ? "Stopping. The worker is shutting the run down."
+        : "Stopped.",
+      "ok",
+    );
     await loadProjects();
   } catch (error) {
     setActionMessage(error.message, "error");

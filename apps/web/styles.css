@@ -586,6 +586,11 @@ a:focus-visible {
   color: var(--ok);
 }
 
+.status.stopped {
+  background: var(--warn-tint);
+  color: var(--warn);
+}
+
 .status.failed {
   background: var(--danger-tint);
   color: var(--danger);

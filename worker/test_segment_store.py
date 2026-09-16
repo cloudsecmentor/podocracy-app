@@ -40,6 +40,25 @@ except Exception as exc:  # pragma: no cover - container-only dependencies
     VOICEOVER_IMPORT_ERROR = str(exc)
 
 
+def local_audio_codec():
+    """First ogg-capable encoder this machine has. The worker image ships
+    libvorbis; other builds may only have opus or flac."""
+    try:
+        from pydub import AudioSegment
+    except ImportError:
+        return None
+    import tempfile as _tempfile
+
+    for candidate in ("libvorbis", "libopus", "flac"):
+        with _tempfile.NamedTemporaryFile(suffix=".ogg") as handle:
+            try:
+                AudioSegment.silent(duration=50).export(handle.name, format="ogg", codec=candidate)
+            except Exception:
+                continue
+            return candidate
+    return None
+
+
 def chunk(chunk_id, start, end="", imp="hello"):
     item = {"chunk_id": chunk_id, "start": start, "imp": imp}
     if end:
@@ -325,6 +344,13 @@ class BuildStagingTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+        codec = local_audio_codec()
+        if codec is None:
+            self.skipTest("no usable ffmpeg audio encoder on this machine")
+        codec_patcher = patch.object(voiceover, "CANONICAL_AUDIO_CODEC", codec)
+        codec_patcher.start()
+        self.addCleanup(codec_patcher.stop)
+
     def write_segment(self, chunk_id, text, source=store.SOURCE_TTS):
         path = store.store_dir(self.root) / f"{chunk_id}.ogg"
         path.write_bytes(b"audio")
@@ -332,12 +358,41 @@ class BuildStagingTests(unittest.TestCase):
         index["segments"][chunk_id] = ready_entry(text, self.voice, source=source, filename=path.name)
         store.save_index(self.root, index)
 
+    def write_tone(self, chunk_id, duration_ms, source=store.SOURCE_TTS):
+        """Real decodable audio, because merging actually re-encodes it.
+
+        The codec is whatever this machine's ffmpeg can write; the worker image
+        uses libvorbis, but a Homebrew build may not have it. What matters for
+        the merge logic is that the clips decode and their durations add up.
+        """
+        try:
+            from pydub import AudioSegment
+        except ImportError:  # pragma: no cover
+            self.skipTest("pydub is not installed")
+        path = store.store_dir(self.root) / f"{chunk_id}.ogg"
+        try:
+            AudioSegment.silent(duration=duration_ms).export(
+                str(path), format="ogg", codec=voiceover.CANONICAL_AUDIO_CODEC
+            )
+        except Exception as exc:  # pragma: no cover - needs ffmpeg
+            self.skipTest(f"cannot encode test audio: {exc}")
+        index = store.load_index(self.root)
+        index["segments"][chunk_id] = ready_entry(
+            chunk_id, self.voice, source=source, filename=path.name
+        )
+        store.save_index(self.root, index)
+
+    def duration_ms(self, path):
+        from pydub import AudioSegment
+
+        return len(AudioSegment.from_file(path))
+
     def test_stages_under_timing_names_and_tempo_by_source(self):
         self.write_segment("c000", "one")
         self.write_segment("c001", "two", source=store.SOURCE_RECORDING)
         chunks = [chunk("c000", "0000", "0010", imp="one"), chunk("c001", "0010", "0020", imp="two")]
 
-        staging, tempo = voiceover.stage_segments_for_build(self.root, chunks, self.params)
+        staging, tempo = voiceover.stage_segments_for_build(self.root, chunks, self.params, self.voice)
 
         self.assertEqual(sorted(item.name for item in staging.glob("*.ogg")), ["0000-0010.ogg", "0010-0020.ogg"])
         self.assertEqual(tempo["0000-0010.ogg"], 1.2)
@@ -346,30 +401,67 @@ class BuildStagingTests(unittest.TestCase):
 
     def test_chunk_without_end_is_staged_under_its_start(self):
         self.write_segment("c000", "one")
-        staging, _ = voiceover.stage_segments_for_build(self.root, [chunk("c000", "0000", imp="one")], self.params)
+        staging, _ = voiceover.stage_segments_for_build(self.root, [chunk("c000", "0000", imp="one")], self.params, self.voice)
         self.assertEqual([item.name for item in staging.glob("*.ogg")], ["0000.ogg"])
 
     def test_missing_audio_is_skipped_but_the_build_continues(self):
         self.write_segment("c000", "one")
         chunks = [chunk("c000", "0000", "0010", imp="one"), chunk("c001", "0010", "0020", imp="two")]
-        staging, tempo = voiceover.stage_segments_for_build(self.root, chunks, self.params)
+        staging, tempo = voiceover.stage_segments_for_build(self.root, chunks, self.params, self.voice)
         self.assertEqual([item.name for item in staging.glob("*.ogg")], ["0000-0010.ogg"])
         self.assertEqual(len(tempo), 1)
 
-    def test_duplicate_timings_fail_loudly(self):
-        # The legacy assembler globs by filename, so a collision would silently
-        # drop one of the two chunks from the mix.
-        self.write_segment("c000", "one")
-        self.write_segment("c001", "two")
-        chunks = [chunk("c000", "0000", "0010", imp="one"), chunk("c001", "0000", "0010", imp="two")]
-        with self.assertRaises(ValueError) as caught:
-            voiceover.stage_segments_for_build(self.root, chunks, self.params)
-        self.assertIn("c000", str(caught.exception))
-        self.assertIn("c001", str(caught.exception))
+    def test_chunks_sharing_a_timing_slot_are_merged(self):
+        """Timing keys have one-second resolution, so a fast exchange puts two
+        chunks in the same second. The assembler globs by filename, so writing
+        both to one name used to drop the first silently."""
+        self.write_tone("c000", 600)
+        self.write_tone("c001", 400)
+        chunks = [chunk("c000", "0923", "0923", imp="one"), chunk("c001", "0923", "0923", imp="two")]
+
+        with self.assertLogs(level="INFO") as logs:
+            staging, tempo = voiceover.stage_segments_for_build(self.root, chunks, self.params, self.voice)
+
+        staged = [item.name for item in staging.glob("*.ogg")]
+        self.assertEqual(staged, ["0923-0923.ogg"])
+        # Both lines survive, in transcript order, with a small gap between them.
+        expected = 600 + voiceover.MERGED_CHUNK_GAP_MS + 400
+        self.assertAlmostEqual(self.duration_ms(staging / "0923-0923.ogg"), expected, delta=120)
+        self.assertEqual(tempo["0923-0923.ogg"], 1.2)
+        self.assertIn("0923-0923 <- c000, c001", "\n".join(logs.output))
+
+    def test_a_three_way_collision_is_merged_in_order(self):
+        self.write_tone("c000", 300)
+        self.write_tone("c001", 300)
+        self.write_tone("c002", 300)
+        chunks = [
+            chunk("c000", "0923", imp="one"),
+            chunk("c001", "0923", imp="two"),
+            chunk("c002", "0923", imp="three"),
+        ]
+        staging, _ = voiceover.stage_segments_for_build(self.root, chunks, self.params, self.voice)
+        self.assertEqual([item.name for item in staging.glob("*.ogg")], ["0923.ogg"])
+        expected = 900 + 2 * voiceover.MERGED_CHUNK_GAP_MS
+        self.assertAlmostEqual(self.duration_ms(staging / "0923.ogg"), expected, delta=150)
+
+    def test_a_merged_slot_holding_a_recording_is_not_sped_up(self):
+        self.write_tone("c000", 300)
+        self.write_tone("c001", 300, source=store.SOURCE_RECORDING)
+        chunks = [chunk("c000", "0923", "0923", imp="one"), chunk("c001", "0923", "0923", imp="two")]
+        _, tempo = voiceover.stage_segments_for_build(self.root, chunks, self.params, self.voice)
+        # Speeding up the user's own voice is the worse trade.
+        self.assertEqual(tempo["0923-0923.ogg"], 1.0)
+
+    def test_a_collision_where_one_side_has_no_audio_still_stages_the_other(self):
+        self.write_tone("c000", 300)
+        chunks = [chunk("c000", "0923", "0923", imp="one"), chunk("c001", "0923", "0923", imp="two")]
+        staging, _ = voiceover.stage_segments_for_build(self.root, chunks, self.params, self.voice)
+        self.assertEqual([item.name for item in staging.glob("*.ogg")], ["0923-0923.ogg"])
+        self.assertAlmostEqual(self.duration_ms(staging / "0923-0923.ogg"), 300, delta=120)
 
     def test_nothing_to_assemble_is_an_error(self):
         with self.assertRaises(ValueError):
-            voiceover.stage_segments_for_build(self.root, [chunk("c000", "0000", imp="one")], self.params)
+            voiceover.stage_segments_for_build(self.root, [chunk("c000", "0000", imp="one")], self.params, self.voice)
 
     def test_stale_audio_is_still_assembled_but_warned_about(self):
         # A hole in the mix is worse than audio that lags the text by one edit,
@@ -377,7 +469,7 @@ class BuildStagingTests(unittest.TestCase):
         self.write_segment("c000", "old text")
         with self.assertLogs(level="WARNING") as logs:
             staging, _ = voiceover.stage_segments_for_build(
-                self.root, [chunk("c000", "0000", imp="new text")], self.params
+                self.root, [chunk("c000", "0000", imp="new text")], self.params, self.voice
             )
         self.assertEqual([item.name for item in staging.glob("*.ogg")], ["0000.ogg"])
         self.assertIn("predates the current text", "\n".join(logs.output))
@@ -706,6 +798,27 @@ class SynthesizeStageTests(unittest.TestCase):
                 self.run_synthesize()
 
         self.assertEqual(self.read_transcript()[0]["audio"]["status"], "failed")
+
+    def test_the_editor_and_the_worker_agree_on_what_is_current(self):
+        """The portal reads `config/params.json` and cannot see the worker's
+        `parameters.json`. Hashing the merged defaults made every generated chunk
+        read `ready` to the worker and `stale` in the editor, permanently."""
+        self.run_synthesize()
+
+        project_params = json.loads(self.params_file.read_text(encoding="utf-8"))
+        merged = voiceover.get_all_params(path=str(self.source))
+        self.assertNotEqual(
+            store.voice_hash(project_params),
+            store.voice_hash(merged),
+            "the two parameter sources must differ or this test proves nothing",
+        )
+
+        # Exactly what the editor renders, via the API's own copy of the rules.
+        described = api_store.describe_chunks(self.project, self.read_transcript(), project_params)
+        statuses = {item["chunk_id"]: item["status"] for item in described}
+        self.assertEqual(statuses["c000"], "ready")
+        self.assertEqual(statuses["c001"], "ready")
+        self.assertEqual(statuses["c002"], "skipped")
 
     def test_deleted_chunk_audio_is_retired_not_destroyed(self):
         self.run_synthesize()

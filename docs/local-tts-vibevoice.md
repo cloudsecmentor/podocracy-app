@@ -116,6 +116,32 @@ empty or less than a quarter of what went in, the log says so and the un-declick
 kept: a recording the user cannot cheaply redo is worth more than a clean one, and an
 aggressive voice-activity verdict on a quiet take would otherwise replace it with silence.
 
+## Two speakers in the same second
+
+Chunk timings have one-second resolution, so a fast exchange can put two chunks at the same
+`start`/`end`. Assembly is keyed on those timings, so both clips are staged as a single file with
+their audio joined in transcript order and a 150 ms gap between them. Nothing is lost, and the
+build logs which slots it merged.
+
+This is common in a two-host show. Before the segment store, both clips were written to the same
+filename and the first was silently dropped from the mix, so some older projects are missing a line
+or two even though they reported success.
+
+## Stopping a run
+
+**Stop processing** on the project page, or in the improved-transcript editor, ends a run without
+restarting anything. Chunks already generated stay in the store, so picking up again with
+**Generate missing** only does the remainder.
+
+The button also covers the case where a run is no longer being driven, after a worker restart, for
+example. It then reads **Reset stuck state** and clears the status so the project can be started
+again. The worker resets orphaned runs by itself on startup too, so this is a manual override
+rather than the only route out.
+
+A stop takes effect within a second or two. Whatever chunk was mid-synthesis is discarded, but the
+previous version of that chunk's audio is untouched: synthesis writes to a temporary file and only
+moves it into place on success.
+
 ## Expected throughput
 
 Synthesis runs roughly **2.4× slower than real time** on an M-series Mac at fp16, and the

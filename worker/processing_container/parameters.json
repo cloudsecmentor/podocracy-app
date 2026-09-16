@@ -84,7 +84,7 @@
         "description": "Max size in MB a provider accepts in one request; larger audio is split into chunks."
     },
     "stt_local_model": {
-        "value": "small",
+        "value": "large",
         "description": "Model used by the local-whisper provider when the project does not set stt_model."
     },
     "whisper_chunk_length_sec": {
@@ -112,7 +112,7 @@
         "description": "Expected number of speakers for pyannote diarization."
     },
     "whisper_default_model_local": {
-        "value": "small",
+        "value": "large",
         "description": "Deprecated, use stt_local_model. The model which will be used for whisper locally if not provided by the user."
     },
     "whisper_api_max_size_mp3": {
