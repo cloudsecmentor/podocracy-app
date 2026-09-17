@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -40,6 +41,24 @@ def install_whisper() -> None:
         subprocess.check_call(command)
     except subprocess.CalledProcessError as exc:
         raise SttError(f"Failed to install {WHISPER_PACKAGE}=={WHISPER_PACKAGE_VERSION}: {exc}") from exc
+
+
+def describe_whisper_failure(exc: subprocess.CalledProcessError) -> str:
+    """A signal death (SIGKILL is the container OOM killer) otherwise looks like a plain crash."""
+    if exc.returncode < 0:
+        try:
+            name = signal.Signals(-exc.returncode).name
+        except ValueError:
+            name = str(-exc.returncode)
+        reason = f"killed by signal {name}"
+        if -exc.returncode == signal.SIGKILL:
+            reason += " (usually the container running out of memory)"
+    else:
+        reason = f"exit code {exc.returncode}"
+    lines = [line for line in (exc.stderr or "").replace("\r", "\n").splitlines() if line.strip()]
+    if not lines:
+        return f"{reason}; no stderr captured"
+    return "{}; stderr tail:\n{}".format(reason, "\n".join(lines[-15:]))
 
 
 class LocalWhisperSttProvider(SttProvider):
@@ -106,11 +125,13 @@ class LocalWhisperSttProvider(SttProvider):
 
             logger.info("Running local whisper: %s", " ".join(command))
             try:
-                subprocess.run(command, check=True, text=True)
+                subprocess.run(command, check=True, text=True, stderr=subprocess.PIPE)
             except FileNotFoundError as exc:
                 raise SttError("The 'whisper' command is not available for the local-whisper provider") from exc
             except subprocess.CalledProcessError as exc:
-                raise SttError(f"Local whisper failed with exit code {exc.returncode}") from exc
+                detail = describe_whisper_failure(exc)
+                logger.error("Local whisper failed: %s", detail)
+                raise SttError(f"Local whisper failed: {detail}") from exc
 
             output_path = Path(temp_dir) / f"{audio_path.stem}.json"
             if not output_path.exists():

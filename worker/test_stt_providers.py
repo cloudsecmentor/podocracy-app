@@ -367,7 +367,7 @@ class LocalWhisperProviderTests(unittest.TestCase):
         provider = LocalWhisperSttProvider()
         captured: dict = {}
 
-        def fake_run(command, check, text):
+        def fake_run(command, check, text, stderr=None):
             captured["command"] = command
             output_dir = Path(command[command.index("--output_dir") + 1])
             (output_dir / "source.json").write_text(json.dumps(LOCAL_WHISPER_JSON), encoding="utf-8")

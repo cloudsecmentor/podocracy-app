@@ -44,6 +44,7 @@ services:
         source: ${PODOCRACY_PROJECTS_DIR:-./data/projects}
         target: /data/projects
       - pyannote-cache:/root/.cache/huggingface
+      - whisper-cache:/root/.cache/whisper
     # Lets the containers reach a TTS server bound to the host (VIBEVOICE_BASE_URL).
     # Docker Desktop resolves this natively; Linux and Colima need the explicit mapping.
     extra_hosts:
@@ -54,3 +55,4 @@ services:
 
 volumes:
   pyannote-cache:
+  whisper-cache:
