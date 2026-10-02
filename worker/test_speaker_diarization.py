@@ -11,7 +11,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from processing_container import shared_functions
-from processing_container.speaker_diarization import assign_speakers_to_words, diarize_speakers
+from processing_container.speaker_diarization import (
+    assign_speakers_to_words,
+    diarization_engine,
+    diarize_speakers,
+    exclusive_turns_from_probabilities,
+)
 
 
 class SpeakerRecognitionTests(unittest.TestCase):
@@ -49,7 +54,7 @@ class SpeakerRecognitionTests(unittest.TestCase):
             audio_path = Path(temp_dir) / "sample.mp3"
             audio_path.touch()
             with (
-                patch.dict(os.environ, {"HF_TOKEN": "test-token"}, clear=False),
+                patch.dict(os.environ, {"HF_TOKEN": "test-token", "DIARIZATION_ENGINE": "pyannote"}, clear=False),
                 patch.dict(
                     sys.modules,
                     {"pyannote": pyannote_module, "pyannote.audio": audio_module},
@@ -60,6 +65,67 @@ class SpeakerRecognitionTests(unittest.TestCase):
         self.assertEqual(calls["num_speakers"], 2)
         self.assertEqual(calls["token"], "test-token")
         self.assertEqual([turn["speaker"] for turn in turns], ["SPEAKER_00", "SPEAKER_01"])
+
+    def test_unknown_diarization_engine_is_rejected(self) -> None:
+        with patch.dict(os.environ, {"DIARIZATION_ENGINE": "whisperx"}, clear=False):
+            with self.assertRaisesRegex(RuntimeError, "pyannote, nemotron"):
+                diarization_engine()
+
+    def test_nemotron_overlap_goes_to_the_most_likely_speaker(self) -> None:
+        import numpy as np
+
+        probabilities = np.zeros((10, 8), dtype=np.float32)
+        probabilities[0:6, 0] = 0.9
+        probabilities[4:10, 1] = 0.95
+
+        turns = exclusive_turns_from_probabilities(probabilities, 0.1, 2)
+
+        self.assertEqual(
+            turns,
+            [
+                {"start": 0.0, "end": 0.4, "speaker": "SPEAKER_00"},
+                {"start": 0.4, "end": 1.0, "speaker": "SPEAKER_01"},
+            ],
+        )
+
+    def test_nemotron_keeps_only_the_requested_speakers_by_talk_time(self) -> None:
+        import numpy as np
+
+        probabilities = np.zeros((20, 8), dtype=np.float32)
+        probabilities[0:4, 0] = 0.9
+        probabilities[0:4, 1] = 0.3
+        probabilities[4:12, 1] = 0.9
+        probabilities[12:20, 2] = 0.9
+
+        turns = exclusive_turns_from_probabilities(probabilities, 0.1, 2)
+
+        # Channel 0 talks least, so its speech is handed to the likelier kept channel.
+        self.assertEqual(
+            turns,
+            [
+                {"start": 0.0, "end": 1.2, "speaker": "SPEAKER_00"},
+                {"start": 1.2, "end": 2.0, "speaker": "SPEAKER_01"},
+            ],
+        )
+
+    def test_nemotron_absorbs_short_flicker_and_keeps_silence_gaps(self) -> None:
+        import numpy as np
+
+        probabilities = np.zeros((30, 8), dtype=np.float32)
+        probabilities[0:10, 0] = 0.9
+        probabilities[10:12, 1] = 0.9
+        probabilities[12:20, 0] = 0.9
+        probabilities[25:30, 1] = 0.9
+
+        turns = exclusive_turns_from_probabilities(probabilities, 0.1, 2)
+
+        self.assertEqual(
+            turns,
+            [
+                {"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00"},
+                {"start": 2.5, "end": 3.0, "speaker": "SPEAKER_01"},
+            ],
+        )
 
     def test_assigns_covering_or_nearest_speaker_turn_by_word_midpoint(self) -> None:
         turns = [

@@ -16,8 +16,9 @@ from urllib.parse import urlparse
 import requests
 from pydub import AudioSegment
 from processing_container.speaker_diarization import (
-    DEFAULT_PYANNOTE_MODEL,
     assign_speakers_to_words,
+    diarization_engine,
+    diarization_model,
     diarize_speakers,
 )
 from stt import (
@@ -391,7 +392,8 @@ def transcribe(source_mp3: Path, params: dict[str, Any], project: Path, logger: 
         write_json(
             project / "work" / "source.diarization.json",
             {
-                "model": os.getenv("PYANNOTE_MODEL", DEFAULT_PYANNOTE_MODEL),
+                "engine": diarization_engine(),
+                "model": diarization_model(),
                 "number_of_speakers": number_of_speakers,
                 "turns": speaker_turns,
             },

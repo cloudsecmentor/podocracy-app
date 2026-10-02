@@ -19,3 +19,6 @@ mutagen==1.47.0
 pysubs2==1.8.0
 yt-dlp
 pyannote.audio==4.0.7
+# nemotron3_diarization is on transformers main only; pin the commit it was verified on.
+transformers @ https://github.com/huggingface/transformers/archive/20eeb6ec72966034e9b7782636d39ac32fd29f35.tar.gz
+librosa==0.11.0
